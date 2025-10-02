@@ -28,6 +28,6 @@ pip install -r requirements.txt
 
 ## (3) Run the application:
 ```bash
-python backend/server.py
+cd backend && python server.py
 ```
 The application will be accessible at `http://localhost:8000`.
