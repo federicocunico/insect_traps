@@ -36,7 +36,7 @@ def check_cameras():
                 
             try:
                 test_path = os.path.join(temp_dir, f"test_cam_{cam_idx}.jpg")
-                width, height = RESOLUTIONS["medium_4:3"]
+                width, height = RESOLUTIONS["max"]
                 
                 print(f"Testing camera {cam_idx}...")
                 capture_image(cam_idx, test_path, width, height, timeout=1000)
@@ -100,10 +100,10 @@ def capture_images():
             return jsonify({"status": "error", "message": "No folder set"}), 400
         
         data = request.get_json()
-        resolution = data.get('resolution', 'medium_4:3')
+        resolution = data.get('resolution', 'max')
         
         if resolution not in RESOLUTIONS:
-            resolution = 'medium_4:3'
+            resolution = 'max'
         
         width, height = RESOLUTIONS[resolution]
         results = {}

@@ -1,27 +1,27 @@
 <template>
-  <div class="camera-controller">
+  <div class="still-capture">
     <!-- Left Panel - Controls -->
     <div class="left-panel">
-      <!-- Recording Controls -->
+      <!-- Capture Controls -->
       <div class="control-section">
-        <h3>🎥 Recording</h3>
+        <h3>📸 Still Capture</h3>
         
-        <!-- Interval Slider -->
+        <!-- Wait Time Slider -->
         <div class="control-group compact">
-          <label>Interval: {{ captureInterval }}ms</label>
+          <label>Wait Time: {{ waitTime }}ms</label>
           <input 
             type="range" 
-            v-model="captureInterval" 
+            v-model="waitTime" 
             min="100" 
-            max="10000" 
-            step="100"
+            max="5000" 
+            step="50"
             class="slider"
           >
           <div class="preset-buttons">
-            <button @click="captureInterval = 500" class="btn btn-mini">500ms</button>
-            <button @click="captureInterval = 1000" class="btn btn-mini">1s</button>
-            <button @click="captureInterval = 2000" class="btn btn-mini">2s</button>
-            <button @click="captureInterval = 5000" class="btn btn-mini">5s</button>
+            <button @click="waitTime = 100" class="btn btn-mini">100ms</button>
+            <button @click="waitTime = 500" class="btn btn-mini">500ms</button>
+            <button @click="waitTime = 1000" class="btn btn-mini">1s</button>
+            <button @click="waitTime = 2000" class="btn btn-mini">2s</button>
           </div>
         </div>
 
@@ -36,14 +36,14 @@
           </select>
         </div>
 
-        <!-- Record Button -->
+        <!-- Capture Button -->
         <button 
-          @click="toggleRecording" 
-          :disabled="!currentFolder"
-          class="btn btn-record full-width"
-          :class="{ recording: isRecording }"
+          @click="captureImages" 
+          :disabled="isCapturing || !currentFolder"
+          class="btn btn-capture full-width"
+          :class="{ capturing: isCapturing }"
         >
-          {{ isRecording ? '⏹️ Stop' : '🔴 Record' }}
+          {{ isCapturing ? '⏳ Capturing...' : '📸 Capture Now' }}
         </button>
         
         <div v-if="!currentFolder" class="warning compact">
@@ -70,7 +70,7 @@
 
       <!-- Camera Status Section -->
       <div class="control-section">
-        <h3>📸 Camera Status</h3>
+        <h3>� Camera Status</h3>
         <button 
           @click="checkCameras" 
           :disabled="isCheckingCameras"
@@ -94,18 +94,18 @@
         </div>
       </div>
 
-      <!-- Recording Stats -->
-      <div v-if="isRecording || captureCount > 0" class="control-section">
-        <h3>📊 Status</h3>
+      <!-- Capture Stats -->
+      <div v-if="captureCount > 0" class="control-section">
+        <h3>� Status</h3>
         <div class="stats-compact">
           <div class="stat-item">
-            <strong>Status:</strong> {{ isRecording ? '🔴 Recording' : '⏸️ Stopped' }}
+            <strong>Total Captures:</strong> {{ captureCount }}
           </div>
           <div class="stat-item">
-            <strong>Captures:</strong> {{ captureCount }}
+            <strong>Wait Time:</strong> {{ waitTime }}ms
           </div>
-          <div class="stat-item">
-            <strong>Interval:</strong> {{ captureInterval }}ms
+          <div v-if="lastCaptureResult" class="stat-item">
+            <strong>Last Result:</strong> {{ lastCaptureResult.success }}/{{ lastCaptureResult.total }} cameras
           </div>
         </div>
       </div>
@@ -190,20 +190,19 @@ const cameraStatus = ref<any>(null)
 const destinationFolder = ref('')
 const folderStatus = ref<any>(null)
 const currentFolder = ref('')
-const captureInterval = ref(1000)
+const waitTime = ref(100)
 const selectedResolution = ref('max')
-const isRecording = ref(false)
+const isCapturing = ref(false)
 const captureCount = ref(0)
-const recentCaptures = ref<any[]>([])
 const latestImages = ref<any>({})
 const imageList = ref<any[]>([])
 const imageCounters = ref<any>({})
 const refreshTimestamp = ref(Date.now())
+const lastCaptureResult = ref<any>(null)
 
 // Refs for DOM elements
 const imageListRef = ref<HTMLElement>()
 
-let recordingInterval: number | null = null
 let imageUpdateInterval: number | null = null
 
 // API base URL
@@ -227,9 +226,6 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  if (recordingInterval) {
-    clearInterval(recordingInterval)
-  }
   if (imageUpdateInterval) {
     clearInterval(imageUpdateInterval)
   }
@@ -284,7 +280,6 @@ async function setFolder() {
       folderStatus.value = { status: 'ok', message: `✅ Folder set: ${result.folder}` }
       currentFolder.value = result.folder
       captureCount.value = 0
-      recentCaptures.value = []
     } else {
       folderStatus.value = { status: 'error', message: `❌ ${result.message}` }
     }
@@ -294,36 +289,16 @@ async function setFolder() {
   }
 }
 
-// Recording control
-function toggleRecording() {
-  if (isRecording.value) {
-    stopRecording()
-  } else {
-    startRecording()
-  }
-}
-
-function startRecording() {
-  if (!currentFolder.value) {
-    alert('Please set a destination folder first')
-    return
-  }
-  
-  isRecording.value = true
-  recordingInterval = window.setInterval(captureImages, captureInterval.value)
-}
-
-function stopRecording() {
-  isRecording.value = false
-  if (recordingInterval) {
-    clearInterval(recordingInterval)
-    recordingInterval = null
-  }
-}
-
 // Image capture
 async function captureImages() {
+  if (isCapturing.value) return
+  
+  isCapturing.value = true
+  
   try {
+    // Wait for the specified time
+    await new Promise(resolve => setTimeout(resolve, waitTime.value))
+    
     const response = await fetch(`${API_BASE}/api/capture-images`, {
       method: 'POST',
       headers: {
@@ -349,12 +324,11 @@ async function captureImages() {
       // Count successful captures
       const successCount = Object.values(result).filter((r: any) => r.status === 'ok').length
       
-      recentCaptures.value.push({
-        timestamp: Date.now(),
+      lastCaptureResult.value = {
         success: successCount,
         total: 4,
         result
-      })
+      }
       
       // Immediately refresh images
       setTimeout(() => {
@@ -368,6 +342,8 @@ async function captureImages() {
     }
   } catch (error) {
     console.error('Error capturing images:', error)
+  } finally {
+    isCapturing.value = false
   }
 }
 
@@ -454,7 +430,7 @@ function formatTime(timestamp: number): string {
 </script>
 
 <style scoped>
-.camera-controller {
+.still-capture {
   display: grid;
   grid-template-columns: 280px 1fr 250px;
   height: calc(100vh - 80px);
@@ -516,12 +492,12 @@ function formatTime(timestamp: number): string {
 }
 
 .btn-primary {
-  background: #667eea;
+  background: #27ae60;
   color: white;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #5a6fd8;
+  background: #219a52;
 }
 
 .btn-secondary {
@@ -539,21 +515,21 @@ function formatTime(timestamp: number): string {
   margin: 0.1rem;
 }
 
-.btn-record {
-  background: #dc3545 !important;
+.btn-capture {
+  background: #27ae60 !important;
   color: white !important;
   font-size: 1rem;
   padding: 0.8rem 1.5rem;
   border: none !important;
 }
 
-.btn-record:hover:not(:disabled) {
-  background: #c82333 !important;
+.btn-capture:hover:not(:disabled) {
+  background: #219a52 !important;
   color: white !important;
 }
 
-.btn-record.recording {
-  background: #28a745 !important;
+.btn-capture.capturing {
+  background: #f39c12 !important;
   color: white !important;
   animation: pulse 2s infinite;
 }
@@ -648,7 +624,7 @@ function formatTime(timestamp: number): string {
 
 .preset-buttons {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
   gap: 0.2rem;
 }
 
@@ -718,7 +694,7 @@ function formatTime(timestamp: number): string {
 }
 
 .camera-header {
-  background: #667eea;
+  background: #27ae60;
   color: white;
   padding: 0.75rem;
   display: flex;
@@ -819,8 +795,8 @@ function formatTime(timestamp: number): string {
 }
 
 .image-item:hover {
-  background: #f0f8ff;
-  border-color: #667eea;
+  background: #e8f5e8;
+  border-color: #27ae60;
   transform: translateY(-1px);
 }
 
@@ -872,13 +848,13 @@ function formatTime(timestamp: number): string {
 
 /* Responsive */
 @media (max-width: 1200px) {
-  .camera-controller {
+  .still-capture {
     grid-template-columns: 250px 1fr 220px;
   }
 }
 
 @media (max-width: 992px) {
-  .camera-controller {
+  .still-capture {
     grid-template-columns: 1fr;
     grid-template-rows: auto auto auto;
     height: auto;
@@ -899,7 +875,7 @@ function formatTime(timestamp: number): string {
 }
 
 @media (max-width: 768px) {
-  .camera-controller {
+  .still-capture {
     padding: 0.5rem;
     gap: 0.5rem;
   }
@@ -915,7 +891,7 @@ function formatTime(timestamp: number): string {
   }
   
   .preset-buttons {
-    grid-template-columns: 1fr 1fr 1fr 1fr;
+    grid-template-columns: 1fr 1fr;
   }
   
   .camera-status-compact {
