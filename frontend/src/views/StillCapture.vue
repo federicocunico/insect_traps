@@ -49,6 +49,11 @@
         <div v-if="!currentFolder" class="warning compact">
           ⚠️ Set folder first
         </div>
+        
+        <!-- Success notification -->
+        <div v-if="showSuccessNotification" class="success-toast">
+          ✅ Capture completed! {{ lastCaptureResult?.success || 0 }}/4 cameras successful
+        </div>
       </div>
 
       <!-- Folder Selection Section -->
@@ -70,7 +75,7 @@
 
       <!-- Camera Status Section -->
       <div class="control-section">
-        <h3>� Camera Status</h3>
+        <h3>📷 Camera Status</h3>
         <button 
           @click="checkCameras" 
           :disabled="isCheckingCameras"
@@ -96,7 +101,7 @@
 
       <!-- Capture Stats -->
       <div v-if="captureCount > 0" class="control-section">
-        <h3>� Status</h3>
+        <h3>📊 Status</h3>
         <div class="stats-compact">
           <div class="stat-item">
             <strong>Total Captures:</strong> {{ captureCount }}
@@ -122,7 +127,7 @@
           >
             <div class="camera-header">
               <h4>Camera {{ camIdx }}</h4>
-              <span class="camera-counter" v-if="imageCounters[camIdx]">
+              <span class="camera-counter" v-if="imageCounters[camIdx] > 0">
                 #{{ imageCounters[camIdx] }}
               </span>
             </div>
@@ -150,24 +155,20 @@
         <h3>📋 Captured Images</h3>
         <div class="image-list" ref="imageListRef">
           <div 
-            v-for="image in imageList" 
+            v-for="image in sortedImageList" 
             :key="image.filename"
-            class="image-item"
+            class="file-item"
             @click="previewImage(image)"
           >
-            <div class="image-thumbnail">
-              <img 
-                :src="image.url + '?t=' + refreshTimestamp" 
-                :alt="image.filename"
-                class="thumbnail"
-                @error="handleImageError"
-              />
-            </div>
-            <div class="image-info">
+            <div class="file-info">
+              <div class="file-header">
+                <span class="acquisition-number">#{{ getAcquisitionNumber(image.filename) }}</span>
+                <span class="camera-badge">{{ getCameraFromFilename(image.filename) }}</span>
+              </div>
               <div class="filename">{{ image.filename }}</div>
-              <div class="image-meta">
-                <span class="size">{{ formatFileSize(image.size) }}</span>
+              <div class="file-meta">
                 <span class="time">{{ formatTime(image.timestamp * 1000) }}</span>
+                <span class="size">{{ formatFileSize(image.size) }}</span>
               </div>
             </div>
           </div>
@@ -182,7 +183,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 
 // Reactive state
 const isCheckingCameras = ref(false)
@@ -199,6 +200,7 @@ const imageList = ref<any[]>([])
 const imageCounters = ref<any>({})
 const refreshTimestamp = ref(Date.now())
 const lastCaptureResult = ref<any>(null)
+const showSuccessNotification = ref(false)
 
 // Refs for DOM elements
 const imageListRef = ref<HTMLElement>()
@@ -207,6 +209,24 @@ let imageUpdateInterval: number | null = null
 
 // API base URL
 const API_BASE = window.location.origin
+
+// Computed property for sorted image list
+const sortedImageList = computed(() => {
+  return [...imageList.value].sort((a, b) => {
+    const aNumber = getAcquisitionNumber(a.filename)
+    const bNumber = getAcquisitionNumber(b.filename)
+    const aCamera = getCameraNumber(a.filename)
+    const bCamera = getCameraNumber(b.filename)
+    
+    // First sort by acquisition number (descending - most recent first)
+    if (aNumber !== bNumber) {
+      return bNumber - aNumber
+    }
+    
+    // If same acquisition number, sort by camera number
+    return aCamera - bCamera
+  })
+})
 
 // Initialize default folder
 onMounted(() => {
@@ -279,7 +299,19 @@ async function setFolder() {
     if (response.ok) {
       folderStatus.value = { status: 'ok', message: `✅ Folder set: ${result.folder}` }
       currentFolder.value = result.folder
-      captureCount.value = 0
+      
+      // Update image counters from backend
+      if (result.image_counters) {
+        imageCounters.value = result.image_counters
+        // Set capture count to the maximum counter value across all cameras
+        const maxCounter = Math.max(...Object.values(result.image_counters) as number[])
+        captureCount.value = maxCounter
+        console.log(`Folder set with existing counters:`, result.image_counters, `Max: ${maxCounter}`)
+      } else {
+        // Reset counters if no existing images
+        imageCounters.value = { '0': 0, '1': 0, '2': 0, '3': 0 }
+        captureCount.value = 0
+      }
     } else {
       folderStatus.value = { status: 'error', message: `❌ ${result.message}` }
     }
@@ -311,15 +343,18 @@ async function captureImages() {
     
     if (response.ok) {
       const result = await response.json()
-      captureCount.value++
       
-      // Update image counters
+      // Update image counters from the backend response
       for (const [camera, data] of Object.entries(result)) {
         if ((data as any).status === 'ok') {
           const camIdx = camera.replace('camera_', '')
           imageCounters.value[camIdx] = (data as any).counter
         }
       }
+      
+      // Update capture count to match the highest counter
+      const maxCounter = Math.max(...Object.values(imageCounters.value) as number[])
+      captureCount.value = maxCounter
       
       // Count successful captures
       const successCount = Object.values(result).filter((r: any) => r.status === 'ok').length
@@ -330,13 +365,19 @@ async function captureImages() {
         result
       }
       
+      // Show success notification
+      showSuccessNotification.value = true
+      setTimeout(() => {
+        showSuccessNotification.value = false
+      }, 3000) // Hide after 3 seconds
+      
       // Immediately refresh images
       setTimeout(() => {
         loadLatestImages()
         loadImageList()
       }, 500) // Small delay to ensure files are written
       
-      console.log(`Capture ${captureCount.value}: ${successCount}/4 cameras successful`)
+      console.log(`Capture completed - Total captures: ${captureCount.value}, Success: ${successCount}/4 cameras`)
     } else {
       console.error('Failed to capture images')
     }
@@ -359,7 +400,13 @@ async function loadStatus() {
       }
       if (status.image_counters) {
         imageCounters.value = status.image_counters
-        captureCount.value = Math.max(...Object.values(status.image_counters) as number[])
+        const maxCounter = Math.max(...Object.values(status.image_counters) as number[])
+        captureCount.value = maxCounter
+        console.log(`Status loaded with counters:`, status.image_counters, `Max: ${maxCounter}`)
+      } else {
+        // Initialize counters if not provided
+        imageCounters.value = { '0': 0, '1': 0, '2': 0, '3': 0 }
+        captureCount.value = 0
       }
     }
   } catch (error) {
@@ -427,6 +474,24 @@ function formatFileSize(bytes: number): string {
 function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString()
 }
+
+function getAcquisitionNumber(filename: string): number {
+  // Extract number from filename like IMG_CAM0_000123.jpg
+  const match = filename.match(/IMG_CAM\d+_(\d+)\.jpg$/)
+  return match && match[1] ? parseInt(match[1], 10) : 0
+}
+
+function getCameraNumber(filename: string): number {
+  // Extract camera number from filename like IMG_CAM0_000123.jpg
+  const match = filename.match(/IMG_CAM(\d+)_\d+\.jpg$/)
+  return match && match[1] ? parseInt(match[1], 10) : 0
+}
+
+function getCameraFromFilename(filename: string): string {
+  // Extract camera name from filename like IMG_CAM0_000123.jpg
+  const cameraNum = getCameraNumber(filename)
+  return `CAM${cameraNum}`
+}
 </script>
 
 <style scoped>
@@ -466,6 +531,29 @@ function formatTime(timestamp: number): string {
   color: #333;
   font-size: 1.1rem;
   font-weight: 600;
+}
+
+/* Success toast notification */
+.success-toast {
+  background: #d4edda;
+  color: #155724;
+  padding: 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+  border: 1px solid #c3e6cb;
+  animation: slideIn 0.3s ease-in-out;
+}
+
+@keyframes slideIn {
+  from { 
+    opacity: 0; 
+    transform: translateY(-10px); 
+  }
+  to { 
+    opacity: 1; 
+    transform: translateY(0); 
+  }
 }
 
 /* Buttons */
@@ -783,9 +871,7 @@ function formatTime(timestamp: number): string {
   gap: 0.75rem;
 }
 
-.image-item {
-  display: flex;
-  gap: 0.75rem;
+.file-item {
   padding: 0.75rem;
   border: 1px solid #e9ecef;
   border-radius: 8px;
@@ -794,43 +880,52 @@ function formatTime(timestamp: number): string {
   background: #fafafa;
 }
 
-.image-item:hover {
+.file-item:hover {
   background: #e8f5e8;
   border-color: #27ae60;
   transform: translateY(-1px);
 }
 
-.image-thumbnail {
-  width: 60px;
-  height: 45px;
-  border-radius: 4px;
-  overflow: hidden;
-  background: #000;
-  flex-shrink: 0;
-}
-
-.thumbnail {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.image-info {
-  flex: 1;
+.file-info {
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  gap: 0.3rem;
+}
+
+.file-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.acquisition-number {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: #27ae60;
+  background: #e8f5e8;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+}
+
+.camera-badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #666;
+  background: #f8f9fa;
+  padding: 0.2rem 0.4rem;
+  border-radius: 3px;
+  border: 1px solid #dee2e6;
 }
 
 .filename {
   font-weight: 500;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   color: #333;
-  margin-bottom: 0.2rem;
   word-break: break-all;
+  opacity: 0.8;
 }
 
-.image-meta {
+.file-meta {
   display: flex;
   justify-content: space-between;
   font-size: 0.7rem;

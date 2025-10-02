@@ -81,10 +81,37 @@ def set_folder():
         os.makedirs(folder_path, exist_ok=True)
         current_folder = folder_path
         
-        # Reset image counters
+        # Scan existing images to determine starting counters
         image_counters = {cam_idx: 0 for cam_idx in CAMERA_IDXS}
         
-        return jsonify({"status": "ok", "folder": current_folder})
+        if os.path.exists(folder_path):
+            try:
+                files = os.listdir(folder_path)
+                image_files = [f for f in files if f.startswith('IMG_CAM') and f.endswith('.jpg')]
+                
+                # Extract counter values from existing files
+                for filename in image_files:
+                    # Format: IMG_CAM{cam_idx}_{counter:06d}.jpg
+                    try:
+                        parts = filename.replace('IMG_CAM', '').replace('.jpg', '').split('_')
+                        if len(parts) == 2:
+                            cam_idx = int(parts[0])
+                            counter = int(parts[1])
+                            if cam_idx in image_counters:
+                                image_counters[cam_idx] = max(image_counters[cam_idx], counter)
+                    except (ValueError, IndexError):
+                        continue  # Skip malformed filenames
+                        
+                print(f"Scanned folder {folder_path}, found counters: {image_counters}")
+            except Exception as e:
+                print(f"Error scanning folder: {e}")
+                # Keep default counters if scanning fails
+        
+        return jsonify({
+            "status": "ok", 
+            "folder": current_folder,
+            "image_counters": image_counters
+        })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
