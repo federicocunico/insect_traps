@@ -1,0 +1,12 @@
+--------------------------------------------------------------------
+Working distance: 628.0 mm
+Resolution: 4056x3040 pixel
+--------------------------------------------------------------------
+Horizontal FOV: 107.7 mm
+Horizontal spatial resolution (HFOV / Resolution_H): 26.6 micron/pixel
+--------------------------------------------------------------------
+Vertical FOV: 81.1 mm
+Vertical spatial resolution (VFOV / Resolution_V): 26.6 micron/pixel
+--------------------------------------------------------------------
+# https://edmundoptics.com/knowledge-center/tech-tools/1951-usaf-resolution
+Risoluzione per millimetro: 2.52 lp/mm

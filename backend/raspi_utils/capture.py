@@ -41,6 +41,10 @@ RESOLUTIONS = {
 }
 
 def build_still_cmd(cam_idx: int, output_path: str, width: int, height: int, timeout: int = 500) -> list[str]:
+    '''
+    # DOCS: https://www.raspberrypi.com/documentation/computers/camera_software.html#rpicam-still
+    # Example: rpicam-still -o long_exposure.jpg --shutter 100000000 --gain 1 --awbgains 1,1 --immediate
+    '''
     cmd = [
         "rpicam-still",
         "--camera", str(cam_idx),
@@ -48,7 +52,7 @@ def build_still_cmd(cam_idx: int, output_path: str, width: int, height: int, tim
         "-t", str(timeout),
         "--width", str(width),
         "--height", str(height),
-        "-q", "100"
+        "-q", "100", "--immediate"
     ]
     return cmd
 
