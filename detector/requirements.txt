@@ -1,0 +1,11 @@
+# Minimal requirements for detector scaffolding
+torch>=1.8.0
+torchvision>=0.9.0
+numpy
+Pillow
+
+# Optional/Recommended packages for convenience
+# ultralytics: provides a unified YOLO API (pip install ultralytics)
+ultralytics
+# timm: optional, used if you want to use timm backbones
+timm
