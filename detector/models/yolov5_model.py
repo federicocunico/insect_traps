@@ -10,6 +10,8 @@ from typing import Any, List, Optional
 import torch
 from detector.models.base import DetectorBase, Detection
 from detector.models.utils import to_numpy
+from ultralytics import YOLO
+
 
 
 class YOLOv5Detector(DetectorBase):
@@ -41,28 +43,30 @@ class YOLOv5Detector(DetectorBase):
             num_classes: optional number of output classes; if provided the
                 model will be adapted when supported.
         """
-        if not pretrained:
-            raise NotImplementedError("Non-pretrained YOLO models not supported yet")
+        # if not pretrained:
+        #     raise NotImplementedError("Non-pretrained YOLO models not supported yet")
 
-        # Create via ultralytics YOLO interface. The API accepts model names
-        # like 'yolov5s', or a path to a YAML/config. YOLO(...) returns a model
-        # object with .predict/.train/.load methods.
-        model = torch.hub.load("ultralytics/yolov5", model_name)
+        # # Create via ultralytics YOLO interface. The API accepts model names
+        # # like 'yolov5s', or a path to a YAML/config. YOLO(...) returns a model
+        # # object with .predict/.train/.load methods.
+        # # model = torch.hub.load("ultralytics/yolov5", model_name)
 
-        if num_classes is not None:
-            # number of classes is handled during training using ultralytics API. We can't edit the model directly.
-            print(
-                "Warning: num_classes parameter is ignored for YOLOv5Detector. Adjust during training/inference."
-            )
-            model.num_classes = num_classes  # for reference only
-        try:
-            # Move to device when possible
-            if hasattr(model, "to"):
-                model.to(device)
-        except Exception:
-            # not fatal
-            pass
-        return cls(model=model, device=device)
+        # if num_classes is not None:
+        #     # number of classes is handled during training using ultralytics API. We can't edit the model directly.
+        #     print(
+        #         "Warning: num_classes parameter is ignored for YOLOv5Detector. Adjust during training/inference."
+        #     )
+        #     model.num_classes = num_classes  # for reference only
+        # try:
+        #     # Move to device when possible
+        #     if hasattr(model, "to"):
+        #         model.to(device)
+        # except Exception:
+        #     # not fatal
+        #     pass
+        # return cls(model=model, device=device)
+        # return YOLO("yolo11s.pt")
+        return YOLO(f"{model_name}.pt")
 
     def load_checkpoint(self, checkpoint_path: str, strict: bool = True) -> None:
         if self.model is None:

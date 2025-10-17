@@ -4,9 +4,11 @@ Provides a small utility to draw bounding boxes (x1,y1,x2,y2) on images and
 save or show the result. The function accepts numpy arrays, PIL Images or
 framework tensors and will preserve the original image size when plotting.
 """
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
+from dataclasses import dataclass
+from detector.utils import iou as _iou
 
 try:
     # local helper from models
@@ -107,6 +109,95 @@ def draw_detections(image, detections: List[object], out_path: Optional[str] = N
     if show:
         try:
             img.show()
+        except Exception:
+            pass
+    return img
+
+
+def _iou(boxA, boxB):
+    # box: [x1,y1,x2,y2]
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+    interW = max(0, xB - xA)
+    interH = max(0, yB - yA)
+    interArea = interW * interH
+    boxAArea = max(0, boxA[2] - boxA[0]) * max(0, boxA[3] - boxA[1])
+    boxBArea = max(0, boxB[2] - boxB[0]) * max(0, boxB[3] - boxB[1])
+    denom = boxAArea + boxBArea - interArea
+    if denom <= 0:
+        return 0.0
+    return interArea / denom
+
+
+@dataclass
+class GT:
+    bbox: Tuple[float, float, float, float]
+    label: str
+
+
+@dataclass
+class Pred:
+    bbox: Tuple[float, float, float, float]
+    score: float
+    label: str
+
+
+def draw_gt_and_preds(image, gts: List[GT], preds: List[Pred], out_path: Optional[str] = None, iou_thresh: float = 0.5) -> Image.Image:
+    """Draw ground-truth boxes in green and predictions in red; matched predictions are magenta.
+
+    Also returns the PIL image and writes out_path if provided.
+    """
+    arr = to_numpy(image)
+    if arr.ndim == 2:
+        arr = np.stack([arr] * 3, axis=-1)
+    if arr.dtype != np.uint8:
+        if arr.max() <= 1.0 and arr.min() >= 0.0:
+            arr = (arr * 255).astype(np.uint8)
+        else:
+            arr = arr.astype(np.uint8)
+
+    h, w = arr.shape[:2]
+    img = Image.fromarray(arr)
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    matched = set()
+    # match preds to gts by IoU and label
+    for pi, p in enumerate(preds):
+        best_iou = 0.0
+        best_gi = None
+        for gi, g in enumerate(gts):
+            if p.label != g.label:
+                continue
+            iouv = _iou(p.bbox, g.bbox)
+            if iouv > best_iou:
+                best_iou = iouv
+                best_gi = gi
+        color = 'red'
+        if best_iou >= iou_thresh:
+            color = 'magenta'
+            matched.add(best_gi)
+        x1, y1, x2, y2 = p.bbox
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+        text = f"{p.label}:{p.score:.2f}"
+        draw.text((x1 + 4, y1 + 4), text, fill='yellow', font=font)
+
+    # draw GTs that weren't matched in green
+    for gi, g in enumerate(gts):
+        if gi in matched:
+            continue
+        x1, y1, x2, y2 = g.bbox
+        draw.rectangle([x1, y1, x2, y2], outline='green', width=2)
+        draw.text((x1 + 4, y1 + 4), str(g.label), fill='white', font=font)
+
+    if out_path:
+        try:
+            img.save(out_path)
         except Exception:
             pass
     return img

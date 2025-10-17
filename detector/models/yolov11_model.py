@@ -7,7 +7,7 @@ DetectorBase.
 from typing import Any, List, Optional
 from detector.models.base import DetectorBase, Detection
 from detector.models.utils import to_numpy
-
+from ultralytics import YOLO
 
 class YOLOv11Detector(DetectorBase):
     """YOLOv11 detector wrapper scaffold using ultralytics-like API.
@@ -31,31 +31,32 @@ class YOLOv11Detector(DetectorBase):
         For a true YOLOv11 implementation replace this with the appropriate
         repository or package loader.
         """
-        try:
-            import torch
-        except Exception:
-            raise RuntimeError("PyTorch is required to create YOLOv11Detector")
+        # try:
+        #     import torch
+        # except Exception:
+        #     raise RuntimeError("PyTorch is required to create YOLOv11Detector")
 
-        # For now use ultralytics/yolov5 hub as a pragmatic fallback for model
-        # creation. Replace with actual YOLOv11 repo when available.
-        model = None
-        try:
-            model = torch.hub.load("ultralytics/yolov5", model_name, pretrained=pretrained)
-            if hasattr(model, "to"):
-                model.to(device)
-        except Exception:
-            # Leave model as None; user will get a clear error at runtime
-            model = None
+        # # For now use ultralytics/yolov5 hub as a pragmatic fallback for model
+        # # creation. Replace with actual YOLOv11 repo when available.
+        # model = None
+        # try:
+        #     model = torch.hub.load("ultralytics/yolov5", model_name, pretrained=pretrained)
+        #     if hasattr(model, "to"):
+        #         model.to(device)
+        # except Exception:
+        #     # Leave model as None; user will get a clear error at runtime
+        #     model = None
 
-        if num_classes is not None and model is not None:
-            # We can't reliably modify number of classes on the hub model here;
-            # leave a non-fatal warning and attach attribute for user reference.
-            try:
-                model.num_classes = int(num_classes)
-            except Exception:
-                pass
+        # if num_classes is not None and model is not None:
+        #     # We can't reliably modify number of classes on the hub model here;
+        #     # leave a non-fatal warning and attach attribute for user reference.
+        #     try:
+        #         model.num_classes = int(num_classes)
+        #     except Exception:
+        #         pass
 
-        return cls(model=model, device=device)
+        # return cls(model=model, device=device)
+        return YOLO(f"{model_name}.pt")
 
     def load_checkpoint(self, checkpoint_path: str, strict: bool = True) -> None:
         if self.model is None:
