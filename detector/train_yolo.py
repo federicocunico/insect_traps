@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 
 from detector.datasets.insect_detection_dataset import InsectDetectionDataset
-from detector.models.yolov5_model import YOLOv5Detector
+from ultralytics import YOLO
 from detector.utils import yolo_to_xyxy, xyxy_to_coco_bbox, evaluate_coco_map
 from detector import visualize
 
@@ -41,21 +41,25 @@ def _extract_boxes_from_results(r):
     return []
 
 
-def train(epochs: int = 50, batch: int = 64, imgsz: int = 1024, vis_n: int = 8):
+def train(model_name: str, epochs: int = 50, batch: int = 64, imgsz: int = 1024, vis_n: int = 8):
     """Train YOLOv5 on the InsectDetectionDataset, evaluate with pycocotools and save visualizations.
 
     Produces:
-    - trained weights under runs/train/exp (by ultralytics trainer)
-    - predictions JSON (runs/train/exp/predictions.json)
-    - visualizations under runs/vis/
+    - trained weights under runs/{model_name}/train/exp (by ultralytics trainer)
+    - predictions JSON (runs/{model_name}/predictions.json)
+    - visualizations under runs/{model_name}/vis/
+    - evaluation metrics (runs/{model_name}/metrics.json)
     """
 
     train_dataset = InsectDetectionDataset("detector/data/InsectDetectionDataset", split="train")
     val_dataset = InsectDetectionDataset("detector/data/InsectDetectionDataset", split="val")
     num_classes = train_dataset.num_classes
-    model_name = "yolov5mu"
-    model = YOLOv5Detector.create_model(num_classes=num_classes, model_name=model_name, pretrained=True)
+    model = YOLO(f"{model_name}.pt")
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    
+    # Create model-specific output directories
+    model_dir = Path("runs") / model_name
+    model_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Dataset images: {len(train_dataset)}, detected classes: {train_dataset.classes()} (nc={num_classes})")
 
@@ -65,17 +69,20 @@ def train(epochs: int = 50, batch: int = 64, imgsz: int = 1024, vis_n: int = 8):
 
     # TRAIN using available API
     print("Starting training...")
-    model.train(data=data_yaml, epochs=epochs, batch=batch, imgsz=imgsz, device=str(device))
+    # Use project parameter to organize outputs by model
+    model.train(data=data_yaml, epochs=epochs, batch=batch, imgsz=imgsz, device=str(device), project=str(model_dir / "train"))
 
-    # locate weights (best or last) in runs/train
+    # locate weights in model-specific directory
+    train_dir = model_dir / "train"
     run_dir = None
-    for p in sorted(Path("runs/train").glob("**/"), reverse=True):
-        # find directory containing .pt weights
-        if p.is_dir() and any(p.glob("*.pt")):
-            run_dir = p
-            break
+    if train_dir.exists():
+        for p in sorted(train_dir.glob("**/"), reverse=True):
+            # find directory containing .pt weights
+            if p.is_dir() and any(p.glob("*.pt")):
+                run_dir = p
+                break
     if run_dir is None:
-        run_dir = Path("runs/train/exp")
+        run_dir = model_dir / "train" / "exp"
     print("Run directory (guessed):", run_dir)
 
     # EVALUATION: build GT annotations and run model to get predictions (use val split)
@@ -147,24 +154,31 @@ def train(epochs: int = 50, batch: int = 64, imgsz: int = 1024, vis_n: int = 8):
             print(f"Prediction failed for {img_path}: {e}")
             continue
 
-    # Save predictions json for inspection
-    pred_out = Path(run_dir) / "predictions.json"
+    # Save predictions json for inspection in model directory
+    pred_out = model_dir / "predictions.json"
     pred_out.parent.mkdir(parents=True, exist_ok=True)
     with open(pred_out, "w") as f:
         json.dump(pred_annotations, f)
 
     # Evaluate using our utility that wraps pycocotools
     print("Evaluating with pycocotools via detector.utils.evaluate_coco_map...")
+    metrics = {}
     try:
         metrics = evaluate_coco_map(gt_annotations, pred_annotations, categories, images_info)
         print("Evaluation metrics:")
         print(metrics)
+        # Save metrics to model directory
+        metrics_out = model_dir / "metrics.json"
+        with open(metrics_out, "w") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"Saved metrics to {metrics_out}")
     except Exception as e:
         print("COCO evaluation failed:", e)
+        metrics = {"error": str(e)}
 
-    # VISUALIZE: draw GT and predictions on a small subset
+    # VISUALIZE: draw GT and predictions on a small subset in model directory
     print("Generating visualizations...")
-    vis_dir = Path("runs/vis")
+    vis_dir = model_dir / "vis"
     vis_dir.mkdir(parents=True, exist_ok=True)
     # map image_id -> list of preds/GTs
     preds_by_image = {}
@@ -203,8 +217,45 @@ def train(epochs: int = 50, batch: int = 64, imgsz: int = 1024, vis_n: int = 8):
         except Exception as e:
             print(f"Visualization failed for image {img_path}: {e}")
 
-    print("Done: training, evaluation and visualization complete.")
+    print(f"Done: training, evaluation and visualization complete for {model_name}.")
+    print(f"Results saved to: {model_dir}")
+    
+    # Create summary file with key info
+    summary = {
+        "model_name": model_name,
+        "epochs": epochs,
+        "batch_size": batch,
+        "image_size": imgsz,
+        "num_classes": num_classes,
+        "train_images": len(train_dataset),
+        "val_images": len(val_dataset),
+        "predictions_count": len(pred_annotations),
+        "gt_annotations_count": len(gt_annotations),
+        "metrics": metrics
+    }
+    summary_out = model_dir / "summary.json"
+    with open(summary_out, "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"Summary saved to: {summary_out}")
 
 
 if __name__ == "__main__":
-    train()
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    models = [
+        "yolov5mu",
+        "yolov5su",
+        "yolov8mu",
+        "yolov8su",
+        "yolov11su",
+        "yolov11mu",
+    ]
+    failed = []
+    for model_name in models:
+        print(f"=== Training model: {model_name} ===")
+        try:
+            train(model_name=model_name, epochs=100, batch=16, imgsz=1024, vis_n=8)
+        except Exception as e:
+            print(f"Training failed for model {model_name}: {e}")
+            failed.append(model_name)
+    if failed:
+        print("The following models failed to train:", failed)
