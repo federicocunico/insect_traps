@@ -4,5 +4,3 @@ __pycache__/
 *.pth
 *.onnx
 
-data/*
-!data/.keep
