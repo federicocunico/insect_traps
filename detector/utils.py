@@ -1,277 +1,305 @@
-"""Shared utilities for detection: box conversions, IoU, simple augmentations, and COCO evaluation.
-
-This module is used by dataset loaders and trainers to avoid duplicated logic
-between YOLO and Faster R-CNN code paths.
-"""
-
-from typing import Tuple, List, Callable, Dict, Any
-from PIL import Image, ImageEnhance
-import numpy as np
-import random
-import json
-import tempfile
+import datetime
+import errno
 import os
+import time
+from collections import defaultdict, deque
+
+import torch
+import torch.distributed as dist
 
 
-def yolo_to_xyxy(
-    box: Tuple[float, float, float, float], img_w: int, img_h: int
-) -> Tuple[float, float, float, float]:
-    xc, yc, w, h = box
-    xc *= img_w
-    yc *= img_h
-    w *= img_w
-    h *= img_h
-    x1 = xc - w / 2
-    y1 = yc - h / 2
-    x2 = xc + w / 2
-    y2 = yc + h / 2
-    return x1, y1, x2, y2
-
-
-def xyxy_to_coco_bbox(b: Tuple[float, float, float, float]) -> List[float]:
-    x1, y1, x2, y2 = b
-    return [float(x1), float(y1), float(max(0.0, x2 - x1)), float(max(0.0, y2 - y1))]
-
-
-def iou(
-    boxA: Tuple[float, float, float, float], boxB: Tuple[float, float, float, float]
-) -> float:
-    xA = max(boxA[0], boxB[0])
-    yA = max(boxA[1], boxB[1])
-    xB = min(boxA[2], boxB[2])
-    yB = min(boxA[3], boxB[3])
-    interW = max(0, xB - xA)
-    interH = max(0, yB - yA)
-    interArea = interW * interH
-    boxAArea = max(0, boxA[2] - boxA[0]) * max(0, boxA[3] - boxA[1])
-    boxBArea = max(0, boxB[2] - boxB[0]) * max(0, boxB[3] - boxB[1])
-    denom = boxAArea + boxBArea - interArea
-    if denom <= 0:
-        return 0.0
-    return interArea / denom
-
-
-def random_resize(img, boxes, min_size=320, max_size=960, step=32):
-    """Randomly resize image and scale boxes accordingly. Size chosen from [min_size, max_size] in steps."""
-    import torchvision.transforms.functional as F
-
-    w, h = img.size
-    choice = random.randrange(min_size // step, max_size // step + 1) * step
-    # preserve aspect ratio: scale shorter side to choice
-    if w < h:
-        new_w = choice
-        new_h = int(h * (choice / w))
-    else:
-        new_h = choice
-        new_w = int(w * (choice / h))
-    img2 = img.resize((new_w, new_h))
-    scale_x = new_w / w
-    scale_y = new_h / h
-    boxes2 = []
-    for b in boxes:
-        x1, y1, x2, y2 = b
-        boxes2.append((x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y))
-    return img2, boxes2
-
-
-def build_mosaic(images, boxes_list, labels_list=None, input_size=640):
-    """Compose 4 images into a mosaic and adjust boxes accordingly.
-
-    images: list of PIL Images
-    boxes_list: list of lists of boxes in xyxy pixel coords (same length as images)
-    labels_list: optional list of label-lists corresponding to boxes_list
-
-    Returns (mosaic_img: PIL.Image, boxes: List[xyxy], labels: List[int]).
+class SmoothedValue:
+    """Track a series of values and provide access to smoothed values over a
+    window or the global series average.
     """
-    import math
 
-    # target size
-    s = input_size
-    mosaic = Image.new("RGB", (s * 2, s * 2), (114, 114, 114))
-    # place images at quadrants with random center
-    yc = s
-    xc = s
-    combined_boxes = []
-    combined_labels = []
-    for i, img in enumerate(images[:4]):
-        # resize img to random scale between 0.4 and 1.0 of s
-        scale = random.uniform(0.4, 1.0)
-        new_w = int(img.width * scale)
-        new_h = int(img.height * scale)
-        img_r = img.resize((new_w, new_h))
-        # pick position
-        if i == 0:
-            x1a, y1a = max(0, xc - new_w), max(0, yc - new_h)
-        elif i == 1:
-            x1a, y1a = xc, max(0, yc - new_h)
-        elif i == 2:
-            x1a, y1a = max(0, xc - new_w), yc
-        else:
-            x1a, y1a = xc, yc
-        mosaic.paste(img_r, (x1a, y1a))
-        # adjust boxes
-        boxes = boxes_list[i]
-        labels = (
-            labels_list[i]
-            if labels_list is not None and i < len(labels_list)
-            else [0] * len(boxes)
-        )
-        for bi, b in enumerate(boxes):
-            x1, y1, x2, y2 = b
-            sx = new_w / img.width
-            sy = new_h / img.height
-            nx1 = x1 * sx + x1a
-            ny1 = y1 * sy + y1a
-            nx2 = x2 * sx + x1a
-            ny2 = y2 * sy + y1a
-            combined_boxes.append((nx1, ny1, nx2, ny2))
-            combined_labels.append(labels[bi] if bi < len(labels) else 0)
-    # final crop to s x s center
-    cx = mosaic.width // 2
-    cy = mosaic.height // 2
-    x0 = max(0, cx - s // 2)
-    y0 = max(0, cy - s // 2)
-    mosaic_cropped = mosaic.crop((x0, y0, x0 + s, y0 + s))
-    # shift boxes according to crop
-    final_boxes = []
-    final_labels = []
-    for bi, b in enumerate(combined_boxes):
-        nx1, ny1, nx2, ny2 = b
-        nx1 -= x0
-        ny1 -= y0
-        nx2 -= x0
-        ny2 -= y0
-        # clip
-        nx1 = max(0, nx1)
-        ny1 = max(0, ny1)
-        nx2 = min(s, nx2)
-        ny2 = min(s, ny2)
-        if nx2 - nx1 > 1 and ny2 - ny1 > 1:
-            final_boxes.append((nx1, ny1, nx2, ny2))
-            final_labels.append(combined_labels[bi])
-    return mosaic_cropped, final_boxes, final_labels
+    def __init__(self, window_size=20, fmt=None):
+        if fmt is None:
+            fmt = "{median:.4f} ({global_avg:.4f})"
+        self.deque = deque(maxlen=window_size)
+        self.total = 0.0
+        self.count = 0
+        self.fmt = fmt
 
+    def update(self, value, n=1):
+        self.deque.append(value)
+        self.count += n
+        self.total += value * n
 
-def evaluate_coco_map(
-    gt_annotations: List[Dict[str, Any]],
-    pred_annotations: List[Dict[str, Any]],
-    categories: List[Dict[str, Any]],
-    images_info: Dict[int, Dict[str, int]] = None,
-) -> Dict[str, float]:
-    """Evaluate COCO mAP using pycocotools. Inputs are lists of annotations/detections in COCO format.
+    def synchronize_between_processes(self):
+        """
+        Warning: does not synchronize the deque!
+        """
+        if not is_dist_avail_and_initialized():
+            return
+        t = torch.tensor([self.count, self.total], dtype=torch.float64, device="cuda")
+        dist.barrier()
+        dist.all_reduce(t)
+        t = t.tolist()
+        self.count = int(t[0])
+        self.total = t[1]
 
-    gt_annotations: list of COCO annotation dicts and images must be included in categories param or provided separately.
-    pred_annotations: list of detection dicts with keys: image_id, category_id, bbox, score.
-    categories: list of category dicts {'id': int, 'name': str}
+    @property
+    def median(self):
+        d = torch.tensor(list(self.deque))
+        return d.median().item()
 
-    Returns a dict with mAP metrics (if pycocotools available) or raises informative error.
-    """
-    try:
-        from pycocotools.coco import COCO
-        from pycocotools.cocoeval import COCOeval
-    except Exception as e:
-        raise RuntimeError(
-            "pycocotools is required for COCO mAP evaluation. Install with `pip install pycocotools`"
+    @property
+    def avg(self):
+        d = torch.tensor(list(self.deque), dtype=torch.float32)
+        return d.mean().item()
+
+    @property
+    def global_avg(self):
+        return self.total / self.count
+
+    @property
+    def max(self):
+        return max(self.deque)
+
+    @property
+    def value(self):
+        return self.deque[-1]
+
+    def __str__(self):
+        return self.fmt.format(
+            median=self.median,
+            avg=self.avg,
+            global_avg=self.global_avg,
+            max=self.max,
+            value=self.value,
         )
 
-    # Build temporary COCO-style ground truth json
-    tmp_gt = tempfile.mkstemp(suffix=".json")[1]
-    tmp_dt = tempfile.mkstemp(suffix=".json")[1]
 
-    # Build images dict and annotations list. Ensure we have width/height per image.
-    images = {}
-    anns = []
-    ann_id = 1
-    for ann in gt_annotations:
-        # ann must include 'image_id', 'bbox', 'category_id'
-        image_id = ann["image_id"]
-        anns.append(
-            dict(
-                id=ann_id,
-                image_id=image_id,
-                category_id=ann["category_id"],
-                bbox=ann["bbox"],
-                area=ann.get("area", ann["bbox"][2] * ann["bbox"][3]),
-                iscrowd=ann.get("iscrowd", 0),
+def all_gather(data):
+    """
+    Run all_gather on arbitrary picklable data (not necessarily tensors)
+    Args:
+        data: any picklable object
+    Returns:
+        list[data]: list of data gathered from each rank
+    """
+    world_size = get_world_size()
+    if world_size == 1:
+        return [data]
+    data_list = [None] * world_size
+    dist.all_gather_object(data_list, data)
+    return data_list
+
+
+def reduce_dict(input_dict, average=True):
+    """
+    Args:
+        input_dict (dict): all the values will be reduced
+        average (bool): whether to do average or sum
+    Reduce the values in the dictionary from all processes so that all processes
+    have the averaged results. Returns a dict with the same fields as
+    input_dict, after reduction.
+    """
+    world_size = get_world_size()
+    if world_size < 2:
+        return input_dict
+    with torch.inference_mode():
+        names = []
+        values = []
+        # sort the keys so that they are consistent across processes
+        for k in sorted(input_dict.keys()):
+            names.append(k)
+            values.append(input_dict[k])
+        values = torch.stack(values, dim=0)
+        dist.all_reduce(values)
+        if average:
+            values /= world_size
+        reduced_dict = {k: v for k, v in zip(names, values)}
+    return reduced_dict
+
+
+class MetricLogger:
+    def __init__(self, delimiter="\t"):
+        self.meters = defaultdict(SmoothedValue)
+        self.delimiter = delimiter
+
+    def update(self, **kwargs):
+        for k, v in kwargs.items():
+            if isinstance(v, torch.Tensor):
+                v = v.item()
+            assert isinstance(v, (float, int))
+            self.meters[k].update(v)
+
+    def __getattr__(self, attr):
+        if attr in self.meters:
+            return self.meters[attr]
+        if attr in self.__dict__:
+            return self.__dict__[attr]
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{attr}'"
+        )
+
+    def __str__(self):
+        loss_str = []
+        for name, meter in self.meters.items():
+            loss_str.append(f"{name}: {str(meter)}")
+        return self.delimiter.join(loss_str)
+
+    def synchronize_between_processes(self):
+        for meter in self.meters.values():
+            meter.synchronize_between_processes()
+
+    def add_meter(self, name, meter):
+        self.meters[name] = meter
+
+    def log_every(self, iterable, print_freq, header=None):
+        i = 0
+        if not header:
+            header = ""
+        start_time = time.time()
+        end = time.time()
+        iter_time = SmoothedValue(fmt="{avg:.4f}")
+        data_time = SmoothedValue(fmt="{avg:.4f}")
+        space_fmt = ":" + str(len(str(len(iterable)))) + "d"
+        if torch.cuda.is_available():
+            log_msg = self.delimiter.join(
+                [
+                    header,
+                    "[{0" + space_fmt + "}/{1}]",
+                    "eta: {eta}",
+                    "{meters}",
+                    "time: {time}",
+                    "data: {data}",
+                    "max mem: {memory:.0f}",
+                ]
             )
-        )
-        # prefer explicit image info passed in images_info, else use per-ann width/height keys, else infer later
-        if images_info and image_id in images_info:
-            images[image_id] = {
-                "id": image_id,
-                "width": int(images_info[image_id].get("width", 0)),
-                "height": int(images_info[image_id].get("height", 0)),
-            }
         else:
-            images[image_id] = {
-                "id": image_id,
-                "width": int(ann.get("width", 0)),
-                "height": int(ann.get("height", 0)),
-            }
-        ann_id += 1
+            log_msg = self.delimiter.join(
+                [
+                    header,
+                    "[{0" + space_fmt + "}/{1}]",
+                    "eta: {eta}",
+                    "{meters}",
+                    "time: {time}",
+                    "data: {data}",
+                ]
+            )
+        MB = 1024.0 * 1024.0
+        for obj in iterable:
+            data_time.update(time.time() - end)
+            yield obj
+            iter_time.update(time.time() - end)
+            if i % print_freq == 0 or i == len(iterable) - 1:
+                eta_seconds = iter_time.global_avg * (len(iterable) - i)
+                eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+                if torch.cuda.is_available():
+                    print(
+                        log_msg.format(
+                            i,
+                            len(iterable),
+                            eta=eta_string,
+                            meters=str(self),
+                            time=str(iter_time),
+                            data=str(data_time),
+                            memory=torch.cuda.max_memory_allocated() / MB,
+                        )
+                    )
+                else:
+                    print(
+                        log_msg.format(
+                            i,
+                            len(iterable),
+                            eta=eta_string,
+                            meters=str(self),
+                            time=str(iter_time),
+                            data=str(data_time),
+                        )
+                    )
+            i += 1
+            end = time.time()
+        total_time = time.time() - start_time
+        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+        print(
+            f"{header} Total time: {total_time_str} ({total_time / len(iterable):.4f} s / it)"
+        )
 
-    # If any image width/height is zero, try to infer from GT boxes (max x+w and y+h per image)
-    need_infer = any(
-        img.get("width", 0) == 0 or img.get("height", 0) == 0 for img in images.values()
-    )
-    if need_infer:
-        # compute from annotations
-        sizes = {}
-        for a in anns:
-            img_id = a["image_id"]
-            x, y, w, h = a["bbox"]
-            max_w = sizes.get(img_id, {}).get("w", 0)
-            max_h = sizes.get(img_id, {}).get("h", 0)
-            max_w = max(max_w, int(x + w))
-            max_h = max(max_h, int(y + h))
-            sizes.setdefault(img_id, {})["w"] = max_w
-            sizes.setdefault(img_id, {})["h"] = max_h
-        for img_id, s in sizes.items():
-            if images.get(img_id, {}).get("width", 0) == 0:
-                images[img_id]["width"] = s.get("w", 0)
-            if images.get(img_id, {}).get("height", 0) == 0:
-                images[img_id]["height"] = s.get("h", 0)
 
-    gt_json = {
-        "images": list(images.values()),
-        "annotations": anns,
-        "categories": categories,
-    }
-    with open(tmp_gt, "w") as f:
-        json.dump(gt_json, f)
+def collate_fn(batch):
+    return tuple(zip(*batch))
 
-    # write predictions
-    with open(tmp_dt, "w") as f:
-        json.dump(pred_annotations, f)
 
-    cocoGt = COCO(tmp_gt)
-    cocoDt = cocoGt.loadRes(tmp_dt)
-    cocoEval = COCOeval(cocoGt, cocoDt, iouType="bbox")
-    cocoEval.evaluate()
-    cocoEval.accumulate()
-    cocoEval.summarize()
-
-    # read out mAPs into a dict
-    stats = cocoEval.stats.tolist() if hasattr(cocoEval, "stats") else []
-    keys = [
-        "mAP",
-        "mAP_50",
-        "mAP_75",
-        "mAP_small",
-        "mAP_medium",
-        "mAP_large",
-        "AR_1",
-        "AR_10",
-        "AR_100",
-        "AR_small",
-        "AR_medium",
-        "AR_large",
-    ]
-    res = {k: stats[i] if i < len(stats) else None for i, k in enumerate(keys)}
-
+def mkdir(path):
     try:
-        os.remove(tmp_gt)
-        os.remove(tmp_dt)
-    except Exception:
-        pass
-    return res
+        os.makedirs(path)
+    except OSError as e:
+        if e.errno != errno.EEXIST:
+            raise
+
+
+def setup_for_distributed(is_master):
+    """
+    This function disables printing when not in master process
+    """
+    import builtins as __builtin__
+
+    builtin_print = __builtin__.print
+
+    def print(*args, **kwargs):
+        force = kwargs.pop("force", False)
+        if is_master or force:
+            builtin_print(*args, **kwargs)
+
+    __builtin__.print = print
+
+
+def is_dist_avail_and_initialized():
+    if not dist.is_available():
+        return False
+    if not dist.is_initialized():
+        return False
+    return True
+
+
+def get_world_size():
+    if not is_dist_avail_and_initialized():
+        return 1
+    return dist.get_world_size()
+
+
+def get_rank():
+    if not is_dist_avail_and_initialized():
+        return 0
+    return dist.get_rank()
+
+
+def is_main_process():
+    return get_rank() == 0
+
+
+def save_on_master(*args, **kwargs):
+    if is_main_process():
+        torch.save(*args, **kwargs)
+
+
+def init_distributed_mode(args):
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        args.rank = int(os.environ["RANK"])
+        args.world_size = int(os.environ["WORLD_SIZE"])
+        args.gpu = int(os.environ["LOCAL_RANK"])
+    elif "SLURM_PROCID" in os.environ:
+        args.rank = int(os.environ["SLURM_PROCID"])
+        args.gpu = args.rank % torch.cuda.device_count()
+    else:
+        print("Not using distributed mode")
+        args.distributed = False
+        return
+
+    args.distributed = True
+
+    torch.cuda.set_device(args.gpu)
+    args.dist_backend = "nccl"
+    print(f"| distributed init (rank {args.rank}): {args.dist_url}", flush=True)
+    torch.distributed.init_process_group(
+        backend=args.dist_backend,
+        init_method=args.dist_url,
+        world_size=args.world_size,
+        rank=args.rank,
+    )
+    torch.distributed.barrier()
+    setup_for_distributed(args.rank == 0)
