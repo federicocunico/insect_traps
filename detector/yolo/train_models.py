@@ -107,9 +107,9 @@ def main():
         'yolov8n',
         'yolov8s',
         'yolov8m',
-        'yolov11n',
-        'yolov11s',
-        'yolov11m',
+        'yolo11n',
+        'yolo11s',
+        'yolo11m',
     ]
     
     img_sizes = [512, 640, 768, 896, 1024]
@@ -119,6 +119,27 @@ def main():
     for img_size in img_sizes:
         for model_name in models:
             experiment_name = f"{model_name}_img{img_size}"
+            experiment_dir = Path(PROJECT) / experiment_name
+            model_path = experiment_dir / 'weights' / 'best.pt'
+            results_csv = experiment_dir / 'results.csv'
+            
+            if results_csv.exists() and model_path.exists():
+                print(f"\n{'#'*100}")
+                print(f"# SKIPPING: {experiment_name} - Already trained")
+                print(f"# Loading existing results...")
+                print(f"{'#'*100}\n")
+                
+                metrics = extract_metrics_from_results(experiment_name, project=PROJECT)
+                if metrics:
+                    metrics['base_model'] = model_name
+                    metrics['img_size_used'] = img_size
+                    try:
+                        val_metrics = validate_model(str(model_path), DATA_PATH, device=DEVICE)
+                        metrics.update(val_metrics)
+                    except Exception as e:
+                        print(f"Warning: Could not validate {experiment_name}: {e}")
+                    all_results.append(metrics)
+                continue
             
             try:
                 print(f"\n{'#'*100}")
@@ -142,7 +163,6 @@ def main():
                     metrics['img_size_used'] = img_size
                     all_results.append(metrics)
                 
-                model_path = Path(PROJECT) / experiment_name / 'weights' / 'best.pt'
                 if model_path.exists():
                     val_metrics = validate_model(str(model_path), DATA_PATH, device=DEVICE)
                     if metrics:
