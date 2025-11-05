@@ -193,6 +193,7 @@ def draw_gt_and_preds(
 
     Also returns the PIL image and writes out_path if provided.
     """
+    bbox_width = 16
     arr = img_to_numpy(image)
     if arr.ndim == 2:
         arr = np.stack([arr] * 3, axis=-1)
@@ -227,7 +228,7 @@ def draw_gt_and_preds(
             color = "magenta"
             matched.add(best_gi)
         x1, y1, x2, y2 = p.bbox
-        draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=bbox_width)
         # Move text above the box
         text = f"{p.label}:{p.score:.2f}"
         text_y = max(0, y1 - 15)  # Position above the box
@@ -238,7 +239,7 @@ def draw_gt_and_preds(
         if gi in matched:
             continue
         x1, y1, x2, y2 = g.bbox
-        draw.rectangle([x1, y1, x2, y2], outline="green", width=2)
+        draw.rectangle([x1, y1, x2, y2], outline="green", width=bbox_width)
         # Move text above the box
         text_y = max(0, y1 - 15)
         draw.text((x1 + 2, text_y), str(g.label), fill="white", font=font)

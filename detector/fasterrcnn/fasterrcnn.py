@@ -9,7 +9,7 @@ from tqdm import tqdm
 from PIL import Image
 from typing import List, Dict, Tuple
 
-from detector.engine import train_one_epoch, evaluate
+from detector.fasterrcnn.engine import train_one_epoch, evaluate
 from detector.datasets.literature_dataset import InsectDetectionDataset
 from detector.visualize import draw_gt_and_preds, GT, Pred
 
@@ -100,19 +100,39 @@ def visualize_samples(
         for idx, sample_i in enumerate(fixed_indices):
             image, target = dataloader.dataset[sample_i]
    
-            actual_idx = dataloader.dataset.indices[idx]
-            real_image = dataloader.dataset.image_files[actual_idx]
+            actual_idx = dataloader.dataset.indices[sample_i]
+            real_image_path = dataloader.dataset.image_files[actual_idx]
    
+            # Load original image to get original size
+            original_image = Image.open(real_image_path).convert("RGB")
+            orig_width, orig_height = original_image.size
+            
+            # Get resized image size
+            resized_height, resized_width = image.shape[1], image.shape[2]
+            
+            # Calculate scale factors
+            scale_x = orig_width / resized_width
+            scale_y = orig_height / resized_height
+            
             image_tensor = image.unsqueeze(0).to(device)
             output = model(image_tensor)
 
-            # vis_image = torch.clamp(image_tensor[0].cpu(), 0, 1)
-            vis_image = Image.open(real_image).convert("RGB")
-
+            # Convert to GT and Pred objects
             gts = convert_target_to_gts(target)
             preds = convert_output_to_preds(output[0], score_thresh=score_thresh)
+            
+            # Scale GT boxes back to original image coordinates
+            for gt in gts:
+                x1, y1, x2, y2 = gt.bbox
+                gt.bbox = (x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y)
+            
+            # Scale predicted boxes back to original image coordinates
+            for pred in preds:
+                x1, y1, x2, y2 = pred.bbox
+                pred.bbox = (x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y)
+            
             draw_gt_and_preds(
-                vis_image,
+                original_image,
                 gts,
                 preds,
                 out_path=output_folder / f"epoch_{epoch:03d}_sample_{idx}.png",
