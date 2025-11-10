@@ -12,35 +12,102 @@ except Exception:
 import shutil
 from sklearn.model_selection import StratifiedKFold
 from collections import defaultdict
+import argparse
+import datetime
 
 
-def load_dataset_info(data_root: str):
-    """Load dataset information from existing YOLO train/val/test splits."""
-    train_txt = Path(data_root) / 'train.txt'
-    val_txt = Path(data_root) / 'val.txt'
-    test_txt = Path(data_root) / 'test.txt'
+def get_dataset_root(name: str):
+    """Return dataset root path for a given dataset key."""
+    key = name.lower()
+    if key in ('hi_res', 'hires', 'hi-res', 'hiresdataset'):
+        return Path('detector/data/hi_res')
+    if key in ('literature', 'insectdetectiondataset', 'literature_dataset'):
+        return Path('detector/data/InsectDetectionDataset')
+    # default
+    return Path(name)
+
+
+def get_unique_project_dir(base_project: str):
+    """Return a non-existing project directory by appending suffixes if needed."""
+    base = Path(base_project)
+    if not base.exists():
+        return str(base)
+    # try numbered suffixes
+    for i in range(1, 1000):
+        candidate = base.with_name(f"{base.name}_run{i}")
+        if not candidate.exists():
+            return str(candidate)
+    # fallback to timestamp
+    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    return str(base.with_name(f"{base.name}_{ts}"))
+
+
+def load_dataset_info(data_root: str, filter_class: int = None):
+    """Load the image information from dataset.
+    
+    Works with datasets that have pre-split files (train.txt, val.txt, test.txt)
+    or datasets with just images/ and labels/ directories.
+    
+    Args:
+        data_root: Path to dataset root
+        filter_class: If provided, count only annotations of this class when determining has_boxes
+    """
+    data_root_path = Path(data_root)
+    train_txt = data_root_path / 'train.txt'
+    val_txt = data_root_path / 'val.txt'
+    test_txt = data_root_path / 'test.txt'
     
     all_images = []
     
+    # Try to load from split files first
+    has_split_files = False
     for split_file in [train_txt, val_txt, test_txt]:
         if split_file.exists():
+            has_split_files = True
             with open(split_file, 'r') as f:
                 for line in f:
                     img_path = line.strip()
                     if img_path:
                         all_images.append(img_path)
     
-    data_root_path = Path(data_root)
+    # If no split files, scan images directory directly
+    if not has_split_files:
+        images_dir = data_root_path / 'images'
+        if images_dir.exists():
+            for img_file in images_dir.glob('*.jpg'):
+                # Store relative path from data_root
+                all_images.append(f"images/{img_file.name}")
+            for img_file in images_dir.glob('*.png'):
+                all_images.append(f"images/{img_file.name}")
+    
+    if not all_images:
+        raise ValueError(f"No images found in {data_root}. Check dataset structure.")
+    
     image_data = []
     
     for img_path in all_images:
         full_img_path = data_root_path / img_path
-        label_path = Path(str(full_img_path).replace('/images/', '/labels/').replace('.jpg', '.txt'))
+        # Handle both absolute and relative paths
+        if not full_img_path.exists():
+            full_img_path = Path(img_path)
+        
+        label_path = Path(str(full_img_path).replace('/images/', '/labels/').replace('.jpg', '.txt').replace('.png', '.txt'))
         
         num_boxes = 0
         if label_path.exists():
             with open(label_path, 'r') as f:
-                num_boxes = len([line for line in f if line.strip()])
+                for line in f:
+                    if line.strip():
+                        # If filter_class is specified, only count that class
+                        if filter_class is not None:
+                            try:
+                                cls = int(line.strip().split()[0])
+                                if cls == filter_class:
+                                    num_boxes += 1
+                            except (ValueError, IndexError):
+                                pass
+                        else:
+                            num_boxes += 1
         
         has_boxes = 1 if num_boxes > 0 else 0
         image_data.append({
@@ -70,12 +137,33 @@ def create_kfold_splits(df: pd.DataFrame, n_splits: int = 5, seed: int = 42):
     return folds
 
 
+def filter_labels_keep_class0(label_path: Path, output_path: Path):
+    """Filter label file to keep only class 0 annotations."""
+    if not label_path.exists():
+        return
+    
+    filtered_lines = []
+    with open(label_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                parts = line.split()
+                if len(parts) >= 5 and parts[0] == '0':  # Keep only class 0
+                    filtered_lines.append(line)
+    
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w') as f:
+        for line in filtered_lines:
+            f.write(line + '\n')
+
+
 def create_fold_yaml(
     fold_data: dict,
     base_data_path: str,
     output_yaml_path: str,
     nc: int = 1,
-    names: list = None
+    names: list = None,
+    filter_class0_only: bool = False
 ):
     """Create a YAML file for a specific fold."""
     fold_dir = Path(output_yaml_path).parent
@@ -86,23 +174,92 @@ def create_fold_yaml(
     
     base_data_path = Path(base_data_path)
     
+    # Create filtered dataset structure if needed
+    if filter_class0_only:
+        # Create a filtered dataset in the fold directory
+        filtered_root = fold_dir / 'filtered_dataset'
+        filtered_images_dir = filtered_root / 'images'
+        filtered_labels_dir = filtered_root / 'labels'
+        filtered_images_dir.mkdir(parents=True, exist_ok=True)
+        filtered_labels_dir.mkdir(parents=True, exist_ok=True)
+    
     with open(train_txt, 'w') as f:
         for _, row in fold_data['train'].iterrows():
             img_path = base_data_path / row['img_path']
-            f.write(f"{img_path.absolute()}\n")
+            
+            if filter_class0_only:
+                # Copy/symlink image and create filtered label
+                img_name = Path(img_path).name
+                target_img = filtered_images_dir / img_name
+                
+                # Create symlink to save space
+                if not target_img.exists():
+                    try:
+                        target_img.symlink_to(img_path.absolute())
+                    except:
+                        # If symlink fails, copy
+                        import shutil
+                        shutil.copy2(img_path, target_img)
+                
+                # Filter and write label
+                label_path = Path(str(img_path).replace('/images/', '/labels/').replace('.jpg', '.txt').replace('.png', '.txt'))
+                output_label = filtered_labels_dir / img_name.replace('.jpg', '.txt').replace('.png', '.txt')
+                filter_labels_keep_class0(label_path, output_label)
+                
+                # Write relative path for YOLO
+                f.write(f"./images/{img_name}\n")
+            else:
+                f.write(f"{img_path.absolute()}\n")
     
     with open(val_txt, 'w') as f:
         for _, row in fold_data['val'].iterrows():
             img_path = base_data_path / row['img_path']
-            f.write(f"{img_path.absolute()}\n")
+            
+            if filter_class0_only:
+                img_name = Path(img_path).name
+                target_img = filtered_images_dir / img_name
+                
+                if not target_img.exists():
+                    try:
+                        target_img.symlink_to(img_path.absolute())
+                    except:
+                        import shutil
+                        shutil.copy2(img_path, target_img)
+                
+                label_path = Path(str(img_path).replace('/images/', '/labels/').replace('.jpg', '.txt').replace('.png', '.txt'))
+                output_label = filtered_labels_dir / img_name.replace('.jpg', '.txt').replace('.png', '.txt')
+                filter_labels_keep_class0(label_path, output_label)
+                
+                f.write(f"./images/{img_name}\n")
+            else:
+                f.write(f"{img_path.absolute()}\n")
     
-    yaml_content = {
-        'path': str(base_data_path.absolute()),
-        'train': str(train_txt.absolute()),
-        'val': str(val_txt.absolute()),
-        'nc': nc,
-        'names': names if names else {0: 'ScafoideusTitanus'}
-    }
+    # Set path based on filtering
+    if filter_class0_only:
+        dataset_path = str(filtered_root.absolute())
+        # Copy train.txt and val.txt into filtered_dataset for YOLO to find
+        filtered_train_txt = filtered_root / 'train.txt'
+        filtered_val_txt = filtered_root / 'val.txt'
+        import shutil
+        shutil.copy2(train_txt, filtered_train_txt)
+        shutil.copy2(val_txt, filtered_val_txt)
+        
+        yaml_content = {
+            'path': dataset_path,
+            'train': 'train.txt',  # Relative to path
+            'val': 'val.txt',
+            'nc': nc,
+            'names': names if names else {0: 'ScafoideusTitanus'}
+        }
+    else:
+        dataset_path = str(base_data_path.absolute())
+        yaml_content = {
+            'path': dataset_path,
+            'train': str(train_txt.absolute()),
+            'val': str(val_txt.absolute()),
+            'nc': nc,
+            'names': names if names else {0: 'ScafoideusTitanus'}
+        }
     
     with open(output_yaml_path, 'w') as f:
         yaml.dump(yaml_content, f, default_flow_style=False)
@@ -223,24 +380,50 @@ def compute_fold_statistics(fold_results: list, base_model: str):
     return stats
 
 
-def main():
-    DATA_ROOT = "detector/data/hi_res"
-    EPOCHS = 100
-    BATCH_SIZE = 16
-    IMG_SIZE = 1024
-    PROJECT = 'runs/kfold'
-    DEVICE = 1
-    N_FOLDS = 5
-    PATIENCE = 20
+def main(
+    DATA_ROOT: str = "detector/data/hi_res",
+    EPOCHS: int = 100,
+    BATCH_SIZE: int = 16,
+    IMG_SIZE: int = 1024,
+    PROJECT: str = None,
+    DEVICE: int = 1,
+    N_FOLDS: int = 5,
+    PATIENCE: int = 20,
+    models: list = None,
+):
+    """Run k-fold experiments.
+
+    DATA_ROOT can be a path or a dataset key (e.g. 'hi_res' or 'literature').
+    PROJECT will be auto-generated (and uniquified) if None.
+    """
+    DATA_ROOT = str(get_dataset_root(DATA_ROOT))
     
-    models = [
-        'yolov5s',
-        'yolov5m',
-        'yolov8s',
-        'yolov8m',
-        'yolo11s',
-        'yolo11m',
-    ]
+    # Detect if this is literature dataset (multi-class) - filter to class 0 only
+    is_literature = 'InsectDetectionDataset' in DATA_ROOT or 'literature' in DATA_ROOT.lower()
+    filter_class0_only = is_literature
+    
+    if filter_class0_only:
+        print(f"\n{'='*80}")
+        print("LITERATURE DATASET DETECTED")
+        print("Filtering annotations to class 0 only (keeping ALL images)")
+        print("Class 1+ annotations will be removed from labels during training")
+        print(f"{'='*80}\n")
+
+    if PROJECT is None:
+        dataset_tag = Path(DATA_ROOT).name
+        PROJECT = f"runs/kfold_{dataset_tag}"
+    # Don't create unique directories - reuse the same one for resume capability
+    # PROJECT = get_unique_project_dir(PROJECT)
+
+    if models is None:
+        models = [
+            'yolov5s',
+            'yolov5m',
+            'yolov8s',
+            'yolov8m',
+            'yolov11s',
+            'yolov11m',
+        ]
     
     print(f"\n{'#'*100}")
     print(f"# K-FOLD CROSS VALIDATION TRAINING")
@@ -252,7 +435,9 @@ def main():
     print(f"{'#'*100}\n")
     
     print("Loading dataset and creating K-fold splits...")
-    df = load_dataset_info(DATA_ROOT)
+    # If filtering class 0 only, count only class 0 boxes for stratification
+    filter_class = 0 if filter_class0_only else None
+    df = load_dataset_info(DATA_ROOT, filter_class=filter_class)
     folds = create_kfold_splits(df, n_splits=N_FOLDS, seed=42)
     
     print(f"\nDataset info:")
@@ -300,7 +485,8 @@ def main():
                                 DATA_ROOT,
                                 fold_yaml_path,
                                 nc=1,
-                                names={0: 'ScafoideusTitanus'}
+                                names={0: 'ScafoideusTitanus'},
+                                filter_class0_only=filter_class0_only
                             )
                         val_metrics = validate_model(str(model_path), str(fold_yaml_path), device=DEVICE)
                         metrics.update(val_metrics)
@@ -321,7 +507,8 @@ def main():
                     DATA_ROOT,
                     fold_yaml_path,
                     nc=1,
-                    names={0: 'ScafoideusTitanus'}
+                    names={0: 'ScafoideusTitanus'},
+                    filter_class0_only=filter_class0_only
                 )
                 
                 print(f"Created fold YAML: {fold_yaml}")
@@ -537,5 +724,40 @@ def main():
         print("\nNo results collected\n")
 
 
+def _parse_args_and_run():
+    parser = argparse.ArgumentParser(description='K-Fold training for YOLO models')
+    parser.add_argument('--dataset', type=str, default='hi_res', help="Dataset key or path (hi_res or literature)")
+    parser.add_argument('--project', type=str, default=None, help='Project base folder (runs/...)')
+    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--batch', type=int, default=16)
+    parser.add_argument('--imgsz', type=int, default=1024)
+    parser.add_argument('--folds', type=int, default=5)
+    parser.add_argument('--device', type=int, default=1)
+    parser.add_argument('--patience', type=int, default=20)
+    parser.add_argument('--models', type=str, default=None, help='Comma-separated model list (e.g. yolov8n,yolov8s)')
+
+    args = parser.parse_args()
+
+    data_root = args.dataset
+    if args.dataset.lower() in ('hi_res', 'hires', 'literature', 'insectdetectiondataset'):
+        data_root = get_dataset_root(args.dataset)
+
+    models_list = None
+    if args.models:
+        models_list = [m.strip() for m in args.models.split(',') if m.strip()]
+
+    main(
+        DATA_ROOT=str(data_root),
+        EPOCHS=args.epochs,
+        BATCH_SIZE=args.batch,
+        IMG_SIZE=args.imgsz,
+        PROJECT=args.project,
+        DEVICE=args.device,
+        N_FOLDS=args.folds,
+        PATIENCE=args.patience,
+        models=models_list,
+    )
+
+
 if __name__ == "__main__":
-    main()
+    _parse_args_and_run()
