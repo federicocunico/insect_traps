@@ -421,8 +421,8 @@ def main(
             'yolov5m',
             'yolov8s',
             'yolov8m',
-            'yolov11s',
-            'yolov11m',
+            'yolo11s',
+            'yolo11m',
         ]
     
     print(f"\n{'#'*100}")
