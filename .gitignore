@@ -10,3 +10,8 @@ runs/
 results/
 stats/
 detector/stats/
+
+
+OLD_runs/
+OLD_stats/
+OLD_wandb/

@@ -1,0 +1,45 @@
+% ==============================================================================
+% Cross-Dataset Evaluation Results
+% ==============================================================================
+
+\subsection{Cross-Dataset Evaluation}
+
+This subsection presents experiments where models are trained on the hi-res dataset 
+and tested on the literature dataset, demonstrating generalization across datasets.
+
+\begin{table}[h!]
+\centering
+\caption{Cross-dataset evaluation: Models trained on hi-res dataset, tested on literature dataset.}
+\label{tab:crossdataset}
+\begin{tabular}{lcccc}
+\hline
+Train Set & Test Set & Model & mAP@0.5 & mAP@0.5--0.95 \\
+\hline
+ours & literature & YOLOv5m & 0.9362 & 0.7548 \\
+ours & literature & YOLOv5s & 0.9409 & 0.7764 \\
+\hline
+\end{tabular}
+\end{table}
+
+% ==============================================================================
+% Combined-Training Evaluation Results
+% ==============================================================================
+
+\subsection{Combined-Training Evaluation}
+
+This subsection reports results obtained when training on the union of both datasets 
+(hi-res and literature). Models are evaluated on the combined test set.
+
+\begin{table}[h!]
+\centering
+\caption{Combined training results: Models trained on union of hi-res and literature datasets.}
+\label{tab:combined}
+\begin{tabular}{lcccc}
+\hline
+Train Set & Test Set & Model & mAP@0.5 & mAP@0.5--0.95 \\
+\hline
+ours + literature & combined & YOLOv5m & 0.8964 & 0.5800 \\
+ours + literature & combined & YOLOv8m & 0.9829 & 0.7530 \\
+\hline
+\end{tabular}
+\end{table}
