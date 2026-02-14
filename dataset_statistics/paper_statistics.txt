@@ -1,0 +1,74 @@
+================================================================================
+DATASET STATISTICS FOR RESEARCH PAPER
+================================================================================
+
+
+Literature:
+--------------------------------------------------------------------------------
+  Alias: LIT
+  Reference: Checola et al., 2024
+  Total images: 615
+  Total annotations: 2,835
+  Avg annotations per image: 4.61
+  Avg image resolution: 3218 × 4939 pixels
+  Acquisition method: Mixed (field, laboratory, scanned traps, smart-trap)
+  Controlled conditions: No
+  Resolution quality: Variable
+
+High-Resolution:
+--------------------------------------------------------------------------------
+  Alias: OURS_1
+  Reference: Current work
+  Total images: 1,760
+  Total annotations: 2,782
+  Avg annotations per image: 1.58
+  Avg image resolution: 4056 × 3040 pixels
+  Avg box size: 184 × 179 pixels
+  Acquisition method: Controlled imaging box with fixed geometry
+  Controlled conditions: Yes
+  Resolution quality: High (~26.6 µm/pixel, 4056×3040)
+  Box area (mean ± std): 33595.7 ± 14485.3 px²
+
+Field Low-Resolution:
+--------------------------------------------------------------------------------
+  Alias: OURS_2
+  Reference: Current work
+  Total images: 3,800
+  Total annotations: 13,142
+  Avg annotations per image: 3.46
+  Avg image resolution: 4028 × 3027 pixels
+  Avg box size: 109 × 106 pixels
+  Acquisition method: Mobile phone (field conditions)
+  Controlled conditions: No
+  Resolution quality: Variable (smartphone-dependent)
+  Box area (mean ± std): 12199.9 ± 7115.0 px²
+
+Combined (Hi-Res + Low-Res):
+--------------------------------------------------------------------------------
+  Alias: OURS_FINAL
+  Reference: Current work
+  Total images: 5,560
+  Total annotations: 15,924
+  Avg annotations per image: 2.86
+  Avg image resolution: 4036 × 3031 pixels
+  Avg box size: 122 × 119 pixels
+  Acquisition method: Combined (controlled + field)
+  Controlled conditions: Mixed
+  Resolution quality: Mixed (high + variable)
+  Box area (mean ± std): 15937.8 ± 12018.3 px²
+
+================================================================================
+KEY COMPARISONS
+================================================================================
+
+Hi-Res vs Literature:
+  Image ratio: 2.86x
+  Annotation ratio: 0.98x
+
+Low-Res vs Literature:
+  Image ratio: 6.18x
+  Annotation ratio: 4.64x
+
+Combined (OURS_FINAL) vs Literature:
+  Image ratio: 9.04x
+  Annotation ratio: 5.62x

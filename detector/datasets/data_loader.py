@@ -339,15 +339,38 @@ class DatasetManager:
         return dataset_dir, splits
     
     def _get_image_paths(self, dataset_dir: Path) -> List[Path]:
-        """Get all image paths from a dataset directory."""
+        """Get all image paths from a dataset directory.
+        
+        Only includes images from subdirectories that have matching
+        labels/ counterparts. This prevents picking up images from
+        directories like 'default/' that lack labels.
+        """
         images_dir = dataset_dir / 'images'
+        labels_dir = dataset_dir / 'labels'
         images = []
         
         if images_dir.exists():
-            # Look for images in subdirectories or directly
+            # Direct children of images/
             for ext in ['*.jpg', '*.png', '*.jpeg']:
                 images.extend(images_dir.glob(ext))
-                images.extend(images_dir.glob(f'**/{ext}'))
+            
+            # For subdirectories, only include those with corresponding labels/
+            subdirs = [d for d in images_dir.iterdir() if d.is_dir()]
+            if subdirs and labels_dir.exists():
+                valid_subdirs = [d for d in subdirs if (labels_dir / d.name).is_dir()]
+                if valid_subdirs:
+                    for subdir in valid_subdirs:
+                        for ext in ['*.jpg', '*.png', '*.jpeg']:
+                            images.extend(subdir.glob(ext))
+                else:
+                    # No valid subdirs matched, fall back to recursive glob
+                    for ext in ['*.jpg', '*.png', '*.jpeg']:
+                        images.extend(images_dir.glob(f'**/{ext}'))
+            elif subdirs:
+                # No labels dir at all, use all subdirectories
+                for ext in ['*.jpg', '*.png', '*.jpeg']:
+                    images.extend(images_dir.glob(f'**/{ext}'))
+            
             return list(set(images))
         
         # Try reading from txt files
@@ -602,26 +625,35 @@ class DatasetManager:
         dataset_dir: Path,
         split: DatasetSplit,
         output_path: Path,
-        relative_paths: bool = True
+        relative_paths: bool = False  # Changed default to False - use absolute paths!
     ) -> Path:
         """Create a YOLO yaml config for a specific fold."""
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Write split files
+        # Write split files with absolute paths
         for name, paths in [('train', split.train), ('val', split.val), ('test', split.test)]:
             txt_path = output_path.parent / f'{name}.txt'
             with open(txt_path, 'w') as f:
                 for p in paths:
-                    if relative_paths:
+                    path = Path(p)
+                    if not relative_paths:
+                        # Use absolute paths - paths from DatasetManager are 
+                        # relative to workspace root, resolve directly
+                        if path.is_absolute():
+                            f.write(f"{path}\n")
+                        else:
+                            f.write(f"{path.absolute()}\n")
+                    else:
                         try:
-                            p = str(Path(p).relative_to(dataset_dir))
+                            p = str(path.relative_to(dataset_dir))
                         except ValueError:
                             pass
-                    f.write(f"{p}\n")
+                        f.write(f"{p}\n")
         
+        # CRITICAL: Set path to output_path.parent where txt files are written!
         config = YOLODatasetConfig(
             name=dataset_dir.name,
-            path=dataset_dir,
+            path=output_path.parent,  # Fixed: point to where txt files are
             nc=1,
             names=self.CLASS_NAMES
         )

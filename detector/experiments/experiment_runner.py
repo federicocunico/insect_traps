@@ -130,6 +130,106 @@ class ExperimentCache:
         self._save_cache()
 
 
+class MetricsCalculator:
+    """Calculate detection metrics using sklearn for reliability."""
+    
+    @staticmethod
+    def compute_detection_metrics(
+        predictions: List[Dict],
+        ground_truths: List[Dict],
+        iou_threshold: float = 0.5
+    ) -> Dict[str, float]:
+        """
+        Compute detection metrics from predictions and ground truths.
+        
+        Args:
+            predictions: List of dicts with 'boxes', 'scores', 'labels'
+            ground_truths: List of dicts with 'boxes', 'labels'
+            iou_threshold: IoU threshold for matching
+            
+        Returns:
+            Dictionary with precision, recall, f1 metrics
+        """
+        from sklearn.metrics import precision_score, recall_score, f1_score
+        
+        all_y_true = []
+        all_y_pred = []
+        
+        for preds, gts in zip(predictions, ground_truths):
+            pred_boxes = preds.get('boxes', [])
+            pred_scores = preds.get('scores', [])
+            gt_boxes = gts.get('boxes', [])
+            
+            if len(gt_boxes) == 0 and len(pred_boxes) == 0:
+                continue
+            
+            matched_gt = set()
+            
+            if len(pred_boxes) > 0 and len(pred_scores) > 0:
+                sorted_indices = np.argsort(pred_scores)[::-1]
+                
+                for idx in sorted_indices:
+                    if idx >= len(pred_boxes):
+                        continue
+                    pred_box = pred_boxes[idx]
+                    
+                    best_iou = 0
+                    best_gt_idx = -1
+                    
+                    for gt_idx, gt_box in enumerate(gt_boxes):
+                        if gt_idx in matched_gt:
+                            continue
+                        iou = MetricsCalculator._compute_iou(pred_box, gt_box)
+                        if iou > best_iou:
+                            best_iou = iou
+                            best_gt_idx = gt_idx
+                    
+                    if best_iou >= iou_threshold and best_gt_idx >= 0:
+                        all_y_true.append(1)
+                        all_y_pred.append(1)
+                        matched_gt.add(best_gt_idx)
+                    else:
+                        all_y_true.append(0)
+                        all_y_pred.append(1)
+            
+            for gt_idx in range(len(gt_boxes)):
+                if gt_idx not in matched_gt:
+                    all_y_true.append(1)
+                    all_y_pred.append(0)
+        
+        if not all_y_true or not all_y_pred:
+            return {'precision': 0.0, 'recall': 0.0, 'f1': 0.0}
+        
+        precision = precision_score(all_y_true, all_y_pred, zero_division=0)
+        recall = recall_score(all_y_true, all_y_pred, zero_division=0)
+        f1 = f1_score(all_y_true, all_y_pred, zero_division=0)
+        
+        return {
+            'precision': float(precision),
+            'recall': float(recall),
+            'f1': float(f1)
+        }
+    
+    @staticmethod
+    def _compute_iou(box1, box2) -> float:
+        """Compute IoU between two boxes [x1, y1, x2, y2]."""
+        box1 = np.array(box1)
+        box2 = np.array(box2)
+        
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        
+        intersection = max(0, x2 - x1) * max(0, y2 - y1)
+        
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union = area1 + area2 - intersection
+        
+        return intersection / union if union > 0 else 0
+
+
 class BaseModelTrainer:
     """Base class for model trainers."""
     
@@ -163,6 +263,8 @@ class YOLOTrainer(BaseModelTrainer):
         patience: int = 20
     ) -> Dict[str, float]:
         from ultralytics import YOLO
+        import gc
+        import torch
         
         model = YOLO(self.config.weights)
         
@@ -180,25 +282,60 @@ class YOLOTrainer(BaseModelTrainer):
             **self.config.extra_args
         )
         
-        return self._extract_metrics(results)
+        # Extract metrics from training CSV
+        metrics = self._extract_metrics(results)
+        
+        # Run validation to get mAP75 and update metrics
+        best_weights = output_dir / 'weights' / 'best.pt'
+        if best_weights.exists():
+            val_metrics = self.validate(best_weights, data_yaml)
+            metrics.update(val_metrics)
+        
+        del model
+        del results
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
+        return metrics
     
     def validate(self, model_path: Path, data_yaml: Path) -> Dict[str, float]:
         from ultralytics import YOLO
+        import gc
+        import torch
         
         model = YOLO(str(model_path))
-        metrics = model.val(data=str(data_yaml), device=self.device)
+        metrics = model.val(data=str(data_yaml), device=self.device, verbose=False)
         
-        return {
+        result = {
             'mAP50': float(metrics.box.map50),
-            'mAP75': float(metrics.box.map75) if hasattr(metrics.box, 'map75') else 0.0,
             'mAP50-95': float(metrics.box.map),
             'precision': float(metrics.box.mp),
             'recall': float(metrics.box.mr),
-            'f1': 2 * metrics.box.mp * metrics.box.mr / (metrics.box.mp + metrics.box.mr + 1e-8)
         }
+        
+        # Extract mAP75
+        if hasattr(metrics.box, 'map75'):
+            result['mAP75'] = float(metrics.box.map75)
+        elif hasattr(metrics.box, 'maps') and len(metrics.box.maps) > 5:
+            result['mAP75'] = float(metrics.box.maps[5])
+        else:
+            result['mAP75'] = 0.0
+        
+        p, r = result['precision'], result['recall']
+        result['f1'] = 2 * p * r / (p + r + 1e-8)
+        
+        del model
+        del metrics
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        return result
     
     def _extract_metrics(self, results) -> Dict[str, float]:
-        """Extract metrics from YOLO training results."""
+        """Extract metrics from YOLO training results CSV."""
         try:
             results_dir = Path(results.save_dir)
             results_csv = results_dir / 'results.csv'
@@ -206,20 +343,33 @@ class YOLOTrainer(BaseModelTrainer):
             if results_csv.exists():
                 df = pd.read_csv(results_csv)
                 df.columns = df.columns.str.strip()
-                last = df.iloc[-1]
                 
-                return {
-                    'mAP50': float(last.get('metrics/mAP50(B)', 0)),
-                    'mAP75': float(last.get('metrics/mAP75(B)', 0)) if 'metrics/mAP75(B)' in df.columns else 0.0,
-                    'mAP50-95': float(last.get('metrics/mAP50-95(B)', 0)),
-                    'precision': float(last.get('metrics/precision(B)', 0)),
-                    'recall': float(last.get('metrics/recall(B)', 0)),
-                    'f1': 0.0  # calculated later
+                # Get best epoch (highest mAP50) instead of last
+                if 'metrics/mAP50(B)' in df.columns:
+                    best_idx = df['metrics/mAP50(B)'].idxmax()
+                    best = df.iloc[best_idx]
+                else:
+                    best = df.iloc[-1]
+                
+                metrics = {
+                    'mAP50': float(best.get('metrics/mAP50(B)', 0)),
+                    'mAP50-95': float(best.get('metrics/mAP50-95(B)', 0)),
+                    'precision': float(best.get('metrics/precision(B)', 0)),
+                    'recall': float(best.get('metrics/recall(B)', 0)),
                 }
+                
+                # Calculate F1 from precision and recall
+                p, r = metrics['precision'], metrics['recall']
+                metrics['f1'] = 2 * p * r / (p + r + 1e-8)
+                
+                # mAP75 not available in training CSV, will be added during validation
+                metrics['mAP75'] = 0.0
+                
+                return metrics
         except Exception as e:
-            print(f"Warning: Could not extract metrics: {e}")
+            print(f"Warning: Could not extract metrics from training: {e}")
         
-        return {'mAP50': 0.0, 'mAP50-95': 0.0, 'precision': 0.0, 'recall': 0.0}
+        return {'mAP50': 0.0, 'mAP50-95': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'mAP75': 0.0}
 
 
 class FasterRCNNTrainer(BaseModelTrainer):
@@ -301,8 +451,18 @@ class FasterRCNNTrainer(BaseModelTrainer):
                     print(f"Early stopping at epoch {epoch+1}")
                     break
         
-        # Save final model
         torch.save(model.state_dict(), output_dir / 'last.pt')
+        
+        del model
+        del optimizer
+        del lr_scheduler
+        del train_loader
+        del val_loader
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         
         return metrics
     
@@ -310,6 +470,7 @@ class FasterRCNNTrainer(BaseModelTrainer):
         import torch
         from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2
         from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+        import gc
         
         with open(data_yaml) as f:
             data_config = yaml.safe_load(f)
@@ -326,7 +487,15 @@ class FasterRCNNTrainer(BaseModelTrainer):
         
         _, val_loader = self._create_dataloaders(data_config, val_only=True)
         
-        return self._evaluate(model, val_loader, device)
+        metrics = self._evaluate(model, val_loader, device)
+        
+        del model
+        del val_loader
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        return metrics
     
     def _create_dataloaders(self, data_config: dict, val_only: bool = False):
         """Create PyTorch dataloaders for Faster R-CNN."""
@@ -359,41 +528,49 @@ class FasterRCNNTrainer(BaseModelTrainer):
         return train_loader, val_loader
     
     def _evaluate(self, model, data_loader, device) -> Dict[str, float]:
-        """Evaluate Faster R-CNN model."""
+        """Evaluate Faster R-CNN model with sklearn metrics."""
         import torch
         from torchmetrics.detection import MeanAveragePrecision
         
         model.eval()
         map_metric = MeanAveragePrecision(iou_thresholds=[0.5, 0.75])
         
+        all_preds = []
+        all_gts = []
+        
         with torch.no_grad():
             for images, targets in data_loader:
                 images = [img.to(device) for img in images]
                 outputs = model(images)
                 
-                preds = []
-                gts = []
                 for out, tgt in zip(outputs, targets):
-                    preds.append({
+                    pred = {
                         'boxes': out['boxes'].cpu(),
                         'scores': out['scores'].cpu(),
                         'labels': out['labels'].cpu()
-                    })
-                    gts.append({
+                    }
+                    gt = {
                         'boxes': tgt['boxes'],
                         'labels': tgt['labels']
-                    })
-                
-                map_metric.update(preds, gts)
+                    }
+                    map_metric.update([pred], [gt])
+                    all_preds.append(pred)
+                    all_gts.append(gt)
         
         result = map_metric.compute()
+        
+        # Use sklearn-based metrics for precision/recall/f1
+        sklearn_metrics = MetricsCalculator.compute_detection_metrics(
+            all_preds, all_gts, iou_threshold=0.5
+        )
         
         return {
             'mAP50': float(result['map_50']),
             'mAP75': float(result['map_75']),
             'mAP50-95': float(result['map']),
-            'precision': 0.0,  # Not directly available
-            'recall': 0.0
+            'precision': sklearn_metrics['precision'],
+            'recall': sklearn_metrics['recall'],
+            'f1': sklearn_metrics['f1']
         }
 
 
@@ -408,6 +585,8 @@ class RTDETRTrainer(BaseModelTrainer):
         patience: int = 20
     ) -> Dict[str, float]:
         from ultralytics import RTDETR
+        import gc
+        import torch
         
         model = RTDETR(self.config.weights)
         
@@ -424,22 +603,54 @@ class RTDETRTrainer(BaseModelTrainer):
             **self.config.extra_args
         )
         
-        return YOLOTrainer._extract_metrics(self, results)
+        metrics = YOLOTrainer._extract_metrics(self, results)
+        
+        best_weights = output_dir / 'weights' / 'best.pt'
+        if best_weights.exists():
+            val_metrics = self.validate(best_weights, data_yaml)
+            metrics.update(val_metrics)
+        
+        del model
+        del results
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
+        return metrics
     
     def validate(self, model_path: Path, data_yaml: Path) -> Dict[str, float]:
         from ultralytics import RTDETR
+        import gc
+        import torch
         
         model = RTDETR(str(model_path))
-        metrics = model.val(data=str(data_yaml), device=self.device)
+        metrics = model.val(data=str(data_yaml), device=self.device, verbose=False)
         
-        return {
+        result = {
             'mAP50': float(metrics.box.map50),
-            'mAP75': float(metrics.box.map75) if hasattr(metrics.box, 'map75') else 0.0,
             'mAP50-95': float(metrics.box.map),
             'precision': float(metrics.box.mp),
             'recall': float(metrics.box.mr),
-            'f1': 2 * metrics.box.mp * metrics.box.mr / (metrics.box.mp + metrics.box.mr + 1e-8)
         }
+        
+        if hasattr(metrics.box, 'map75'):
+            result['mAP75'] = float(metrics.box.map75)
+        elif hasattr(metrics.box, 'maps') and len(metrics.box.maps) > 5:
+            result['mAP75'] = float(metrics.box.maps[5])
+        else:
+            result['mAP75'] = 0.0
+        
+        p, r = result['precision'], result['recall']
+        result['f1'] = 2 * p * r / (p + r + 1e-8)
+        
+        del model
+        del metrics
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        return result
 
 
 def get_trainer(config: ModelConfig, device: Union[int, str] = 0) -> BaseModelTrainer:
@@ -457,26 +668,26 @@ def get_trainer(config: ModelConfig, device: Union[int, str] = 0) -> BaseModelTr
 # Pre-defined model configurations
 MODEL_CONFIGS = {
     # YOLO v5
-    'yolov5n': ModelConfig('yolov5n', ModelFamily.YOLO, 'yolov5nu.pt'),
-    'yolov5s': ModelConfig('yolov5s', ModelFamily.YOLO, 'yolov5su.pt'),
-    'yolov5m': ModelConfig('yolov5m', ModelFamily.YOLO, 'yolov5mu.pt'),
+    'yolov5n': ModelConfig('yolov5n', ModelFamily.YOLO, 'yolov5nu.pt', batch_size=64),
+    'yolov5s': ModelConfig('yolov5s', ModelFamily.YOLO, 'yolov5su.pt', batch_size=48),
+    'yolov5m': ModelConfig('yolov5m', ModelFamily.YOLO, 'yolov5mu.pt', batch_size=32),
     
     # YOLO v8
-    'yolov8n': ModelConfig('yolov8n', ModelFamily.YOLO, 'yolov8n.pt'),
-    'yolov8s': ModelConfig('yolov8s', ModelFamily.YOLO, 'yolov8s.pt'),
-    'yolov8m': ModelConfig('yolov8m', ModelFamily.YOLO, 'yolov8m.pt'),
+    'yolov8n': ModelConfig('yolov8n', ModelFamily.YOLO, 'yolov8n.pt', batch_size=64),
+    'yolov8s': ModelConfig('yolov8s', ModelFamily.YOLO, 'yolov8s.pt', batch_size=48),
+    'yolov8m': ModelConfig('yolov8m', ModelFamily.YOLO, 'yolov8m.pt', batch_size=32),
     
     # YOLO v11
-    'yolo11n': ModelConfig('yolo11n', ModelFamily.YOLO, 'yolo11n.pt'),
-    'yolo11s': ModelConfig('yolo11s', ModelFamily.YOLO, 'yolo11s.pt'),
-    'yolo11m': ModelConfig('yolo11m', ModelFamily.YOLO, 'yolo11m.pt'),
+    'yolo11n': ModelConfig('yolo11n', ModelFamily.YOLO, 'yolo11n.pt', batch_size=64),
+    'yolo11s': ModelConfig('yolo11s', ModelFamily.YOLO, 'yolo11s.pt', batch_size=48),
+    'yolo11m': ModelConfig('yolo11m', ModelFamily.YOLO, 'yolo11m.pt', batch_size=32),
     
     # Faster R-CNN
-    'fasterrcnn_resnet50': ModelConfig('fasterrcnn_resnet50', ModelFamily.FASTER_RCNN, 'fasterrcnn_resnet50_fpn_v2'),
+    'fasterrcnn_resnet50': ModelConfig('fasterrcnn_resnet50', ModelFamily.FASTER_RCNN, 'fasterrcnn_resnet50_fpn_v2', batch_size=16),
     
     # RT-DETR
-    'rtdetr_l': ModelConfig('rtdetr_l', ModelFamily.RTDETR, 'rtdetr-l.pt'),
-    'rtdetr_x': ModelConfig('rtdetr_x', ModelFamily.RTDETR, 'rtdetr-x.pt'),
+    'rtdetr_l': ModelConfig('rtdetr_l', ModelFamily.RTDETR, 'rtdetr-l.pt', batch_size=16),
+    'rtdetr_x': ModelConfig('rtdetr_x', ModelFamily.RTDETR, 'rtdetr-x.pt', batch_size=12),
 }
 
 
@@ -498,6 +709,67 @@ class ExperimentRunner:
         self.cache = ExperimentCache(self.output_dir / '.cache')
         
         self.results_df = None
+    
+    def _create_fold_data_yaml(
+        self,
+        dataset_dir: Path,
+        split: DatasetSplit,
+        fold_dir: Path
+    ) -> Path:
+        """
+        Create a YOLO data.yaml for a specific fold with ABSOLUTE paths.
+        
+        This is the key fix - we use absolute paths to image files so that
+        each fold correctly uses its own train/val split regardless of
+        where the data.yaml path field points.
+        """
+        fold_dir.mkdir(parents=True, exist_ok=True)
+        
+        def resolve_path(img_path):
+            """Resolve image path to absolute, handling various input formats."""
+            path = Path(img_path)
+            if path.is_absolute():
+                return str(path)
+            # Paths from DatasetManager are relative to workspace root
+            # Just resolve them directly without prepending dataset_dir
+            return str(path.absolute())
+        
+        # Write train.txt with absolute paths
+        train_txt = fold_dir / 'train.txt'
+        with open(train_txt, 'w') as f:
+            for img_path in split.train:
+                f.write(f"{resolve_path(img_path)}\n")
+        
+        # Write val.txt with absolute paths
+        val_txt = fold_dir / 'val.txt'
+        with open(val_txt, 'w') as f:
+            for img_path in split.val:
+                f.write(f"{resolve_path(img_path)}\n")
+        
+        # Write test.txt if available
+        test_txt = None
+        if split.test:
+            test_txt = fold_dir / 'test.txt'
+            with open(test_txt, 'w') as f:
+                for img_path in split.test:
+                    f.write(f"{resolve_path(img_path)}\n")
+        
+        # CRITICAL: Set path to fold_dir so YOLO reads our fold-specific txt files!
+        data_yaml = fold_dir / 'data.yaml'
+        config = {
+            'path': str(fold_dir.absolute()),
+            'train': 'train.txt',
+            'val': 'val.txt',
+            'nc': 1,
+            'names': {0: 'ScafoideusTitanus'}
+        }
+        if test_txt:
+            config['test'] = 'test.txt'
+        
+        with open(data_yaml, 'w') as f:
+            yaml.dump(config, f, default_flow_style=False)
+        
+        return data_yaml
     
     def run_experiment(
         self,
@@ -525,12 +797,18 @@ class ExperimentRunner:
         
         split = splits[config.fold]
         
-        # Create fold-specific yaml
+        # Create fold-specific data.yaml with ABSOLUTE paths
+        # This is the critical fix - each fold gets its own correct data!
         fold_dir = self.output_dir / config.name / f'fold_{config.fold}'
         fold_dir.mkdir(parents=True, exist_ok=True)
         
-        data_yaml = fold_dir / 'data.yaml'
-        self.data_manager.create_fold_yaml(dataset_dir, split, data_yaml)
+        data_yaml = self._create_fold_data_yaml(dataset_dir, split, fold_dir)
+        
+        # Log fold info for verification
+        print(f"Fold {config.fold} data:")
+        print(f"  Train: {len(split.train)} images")
+        print(f"  Val: {len(split.val)} images")
+        print(f"  Test: {len(split.test)} images")
         
         # Get trainer
         trainer = get_trainer(config.model, self.device)
@@ -644,9 +922,14 @@ class ExperimentRunner:
                 test_dataset, seed=seed
             )
             
-            test_yaml = self.output_dir / name / 'test_data.yaml'
-            self.data_manager.create_fold_yaml(
-                test_dataset_dir, test_splits[0], test_yaml
+            # Create test data yaml with ABSOLUTE paths (use first split's val as test)
+            test_fold_dir = self.output_dir / name / 'test_eval'
+            test_fold_dir.mkdir(parents=True, exist_ok=True)
+            
+            # For cross-dataset eval, use val split as test data
+            test_split = test_splits[0]
+            test_yaml = self._create_fold_data_yaml(
+                test_dataset_dir, test_split, test_fold_dir
             )
             
             trainer = get_trainer(model_config, self.device)

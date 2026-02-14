@@ -18,7 +18,7 @@ python run_experiments.py --list
 python run_experiments.py --group exp1 --device 0
 
 # Run all experiments
-python run_experiments.py --all --device 1
+python run_experiments.py --all --device 0
 ```
 
 ## Project Structure
