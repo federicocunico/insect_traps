@@ -94,13 +94,15 @@ EXPERIMENT_GROUPS = {
         'img_size': 1024,
     },
     'exp5': {
-        'name': 'Alternative Models',
-        'description': 'Non-YOLO model architectures',
+        'name': 'Alternative Architectures',
+        'description': 'Non-YOLO architectures at parity with YOLO (full resolution sweep, 5-fold CV)',
         'datasets': ['hi_res', 'low_res'],
         'models': ['fasterrcnn_resnet50', 'rtdetr_l'],
         'type': 'kfold',
-        'n_folds': 3,  # Fewer folds due to training time
-        'img_size': 640,  # Smaller for memory
+        'n_folds': 5,  # Parity with exp1 YOLO baselines
+        # Same resolution sweep as exp2; memory-safe batch sizes are resolved
+        # automatically per (model, resolution) in run_kfold_experiment.
+        'img_sizes': [512, 640, 768, 1024],
     },
     'test': {
         'name': 'Quick Test',
@@ -357,17 +359,33 @@ class ExperimentSuite:
         
         # Save LaTeX table if applicable
         if 'mAP50_mean' in df.columns:
-            latex_df = df[['dataset', 'model', 'mAP50_mean', 'mAP50_std', 
-                          'mAP50-95_mean', 'mAP50-95_std']].copy()
-            latex_df['mAP50'] = latex_df.apply(
-                lambda r: f"{r['mAP50_mean']:.3f} ± {r['mAP50_std']:.3f}", axis=1
-            )
-            latex_df['mAP50-95'] = latex_df.apply(
-                lambda r: f"{r['mAP50-95_mean']:.3f} ± {r['mAP50-95_std']:.3f}", axis=1
-            )
-            
+            latex_df = df.copy()
+
+            def fmt_pair(mean_col, std_col):
+                if mean_col in latex_df.columns and std_col in latex_df.columns:
+                    return latex_df.apply(
+                        lambda r: f"{r[mean_col]:.3f} ± {r[std_col]:.3f}", axis=1
+                    )
+                return None
+
+            # Report mAP@50, mAP@50-95 and the operating-point metrics (P/R/F1)
+            # so the table is consistent with the metrics computed for every method.
+            metric_cols = []
+            for label, mean_col, std_col in [
+                ('mAP50', 'mAP50_mean', 'mAP50_std'),
+                ('mAP50-95', 'mAP50-95_mean', 'mAP50-95_std'),
+                ('Precision', 'precision_mean', 'precision_std'),
+                ('Recall', 'recall_mean', 'recall_std'),
+                ('F1', 'f1_mean', 'f1_std'),
+            ]:
+                pair = fmt_pair(mean_col, std_col)
+                if pair is not None:
+                    latex_df[label] = pair
+                    metric_cols.append(label)
+
+            id_cols = [c for c in ['dataset', 'model', 'img_size'] if c in latex_df.columns]
             latex_path = output_path.with_suffix('.tex')
-            latex_df[['dataset', 'model', 'mAP50', 'mAP50-95']].to_latex(
+            latex_df[id_cols + metric_cols].to_latex(
                 latex_path, index=False, escape=False
             )
             print(f"LaTeX table saved to {latex_path}")

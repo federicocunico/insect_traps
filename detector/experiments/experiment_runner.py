@@ -166,12 +166,15 @@ class MetricsCalculator:
             matched_gt = set()
             
             if len(pred_boxes) > 0 and len(pred_scores) > 0:
-                sorted_indices = np.argsort(pred_scores)[::-1]
+                # Convert to numpy if torch tensor to avoid stride issues with [::-1]
+                pred_scores_np = pred_scores.numpy() if hasattr(pred_scores, 'numpy') else np.array(pred_scores)
+                pred_boxes_arr = pred_boxes.numpy() if hasattr(pred_boxes, 'numpy') else np.array(pred_boxes)
+                sorted_indices = np.argsort(pred_scores_np)[::-1]
                 
                 for idx in sorted_indices:
-                    if idx >= len(pred_boxes):
+                    if idx >= len(pred_boxes_arr):
                         continue
-                    pred_box = pred_boxes[idx]
+                    pred_box = pred_boxes_arr[idx]
                     
                     best_iou = 0
                     best_gt_idx = -1
@@ -527,22 +530,31 @@ class FasterRCNNTrainer(BaseModelTrainer):
         
         return train_loader, val_loader
     
-    def _evaluate(self, model, data_loader, device) -> Dict[str, float]:
-        """Evaluate Faster R-CNN model with sklearn metrics."""
+    def _evaluate(self, model, data_loader, device, score_threshold: float = 0.5) -> Dict[str, float]:
+        """Evaluate Faster R-CNN model with sklearn metrics.
+
+        mAP (torchmetrics) is computed over *all* predictions, as it integrates
+        across confidence levels by design. Precision/Recall/F1 are operating-point
+        metrics, so they are computed only on predictions whose confidence is at
+        least ``score_threshold`` (default 0.5, matching the Ultralytics default
+        used by YOLO/RT-DETR). Without this filter the unbounded number of
+        low-confidence Faster R-CNN detections collapses precision to ~0.2,
+        making P/R/F1 incomparable across architectures.
+        """
         import torch
         from torchmetrics.detection import MeanAveragePrecision
-        
+
         model.eval()
         map_metric = MeanAveragePrecision(iou_thresholds=[0.5, 0.75])
-        
+
         all_preds = []
         all_gts = []
-        
+
         with torch.no_grad():
             for images, targets in data_loader:
                 images = [img.to(device) for img in images]
                 outputs = model(images)
-                
+
                 for out, tgt in zip(outputs, targets):
                     pred = {
                         'boxes': out['boxes'].cpu(),
@@ -553,13 +565,21 @@ class FasterRCNNTrainer(BaseModelTrainer):
                         'boxes': tgt['boxes'],
                         'labels': tgt['labels']
                     }
+                    # mAP uses the full score distribution.
                     map_metric.update([pred], [gt])
-                    all_preds.append(pred)
+                    # P/R/F1 use a fixed operating point (confidence >= threshold).
+                    keep = pred['scores'] >= score_threshold
+                    thr_pred = {
+                        'boxes': pred['boxes'][keep],
+                        'scores': pred['scores'][keep],
+                        'labels': pred['labels'][keep],
+                    }
+                    all_preds.append(thr_pred)
                     all_gts.append(gt)
-        
+
         result = map_metric.compute()
-        
-        # Use sklearn-based metrics for precision/recall/f1
+
+        # Use sklearn-based metrics for precision/recall/f1 at the chosen operating point
         sklearn_metrics = MetricsCalculator.compute_detection_metrics(
             all_preds, all_gts, iou_threshold=0.5
         )
@@ -668,27 +688,56 @@ def get_trainer(config: ModelConfig, device: Union[int, str] = 0) -> BaseModelTr
 # Pre-defined model configurations
 MODEL_CONFIGS = {
     # YOLO v5
-    'yolov5n': ModelConfig('yolov5n', ModelFamily.YOLO, 'yolov5nu.pt', batch_size=64),
-    'yolov5s': ModelConfig('yolov5s', ModelFamily.YOLO, 'yolov5su.pt', batch_size=48),
-    'yolov5m': ModelConfig('yolov5m', ModelFamily.YOLO, 'yolov5mu.pt', batch_size=32),
+    'yolov5n': ModelConfig('yolov5n', ModelFamily.YOLO, 'yolov5nu.pt'),
+    'yolov5s': ModelConfig('yolov5s', ModelFamily.YOLO, 'yolov5su.pt'),
+    'yolov5m': ModelConfig('yolov5m', ModelFamily.YOLO, 'yolov5mu.pt'),
     
     # YOLO v8
-    'yolov8n': ModelConfig('yolov8n', ModelFamily.YOLO, 'yolov8n.pt', batch_size=64),
-    'yolov8s': ModelConfig('yolov8s', ModelFamily.YOLO, 'yolov8s.pt', batch_size=48),
-    'yolov8m': ModelConfig('yolov8m', ModelFamily.YOLO, 'yolov8m.pt', batch_size=32),
+    'yolov8n': ModelConfig('yolov8n', ModelFamily.YOLO, 'yolov8n.pt'),
+    'yolov8s': ModelConfig('yolov8s', ModelFamily.YOLO, 'yolov8s.pt'),
+    'yolov8m': ModelConfig('yolov8m', ModelFamily.YOLO, 'yolov8m.pt'),
     
     # YOLO v11
-    'yolo11n': ModelConfig('yolo11n', ModelFamily.YOLO, 'yolo11n.pt', batch_size=64),
-    'yolo11s': ModelConfig('yolo11s', ModelFamily.YOLO, 'yolo11s.pt', batch_size=48),
-    'yolo11m': ModelConfig('yolo11m', ModelFamily.YOLO, 'yolo11m.pt', batch_size=32),
+    'yolo11n': ModelConfig('yolo11n', ModelFamily.YOLO, 'yolo11n.pt'),
+    'yolo11s': ModelConfig('yolo11s', ModelFamily.YOLO, 'yolo11s.pt'),
+    'yolo11m': ModelConfig('yolo11m', ModelFamily.YOLO, 'yolo11m.pt'),
     
     # Faster R-CNN
-    'fasterrcnn_resnet50': ModelConfig('fasterrcnn_resnet50', ModelFamily.FASTER_RCNN, 'fasterrcnn_resnet50_fpn_v2', batch_size=16),
+    'fasterrcnn_resnet50': ModelConfig('fasterrcnn_resnet50', ModelFamily.FASTER_RCNN, 'fasterrcnn_resnet50_fpn_v2'),
     
     # RT-DETR
-    'rtdetr_l': ModelConfig('rtdetr_l', ModelFamily.RTDETR, 'rtdetr-l.pt', batch_size=16),
-    'rtdetr_x': ModelConfig('rtdetr_x', ModelFamily.RTDETR, 'rtdetr-x.pt', batch_size=12),
+    'rtdetr_l': ModelConfig('rtdetr_l', ModelFamily.RTDETR, 'rtdetr-l.pt'),
+    'rtdetr_x': ModelConfig('rtdetr_x', ModelFamily.RTDETR, 'rtdetr-x.pt'),
 }
+
+
+# Memory-safe batch sizes per (model, image resolution) for the heavier
+# architectures, so the full 512/640/768/1024 sweep fits in GPU/RAM without OOM
+# on the target machine (RTX 5090, 24 GB system RAM). YOLO is light enough to
+# keep its default batch of 16 at every resolution and is intentionally omitted.
+BATCH_SIZE_OVERRIDES = {
+    'fasterrcnn_resnet50': {512: 8, 640: 6, 768: 4, 1024: 2},
+    'rtdetr_l': {512: 16, 640: 12, 768: 8, 1024: 6},
+    'rtdetr_x': {512: 12, 640: 8, 768: 6, 1024: 4},
+}
+
+
+def get_safe_batch_size(model_name: str, img_size: int, default: int = 16) -> int:
+    """Return a memory-safe batch size for a given model and resolution.
+
+    Falls back to ``default`` for models without an override (e.g. YOLO). For an
+    unlisted resolution it picks the batch of the smallest defined resolution
+    that is >= ``img_size`` (i.e. the more conservative setting).
+    """
+    table = BATCH_SIZE_OVERRIDES.get(model_name)
+    if not table:
+        return default
+    if img_size in table:
+        return table[img_size]
+    for res in sorted(table):
+        if img_size <= res:
+            return table[res]
+    return table[max(table)]
 
 
 class ExperimentRunner:
@@ -858,13 +907,17 @@ class ExperimentRunner:
         force: bool = False
     ) -> List[ExperimentResults]:
         """Run k-fold cross-validation experiment."""
-        
-        model_config = MODEL_CONFIGS.get(model_name)
-        if model_config is None:
+
+        base_config = MODEL_CONFIGS.get(model_name)
+        if base_config is None:
             raise ValueError(f"Unknown model: {model_name}. Available: {list(MODEL_CONFIGS.keys())}")
-        
+
+        # Deep-copy so per-run img_size/batch overrides never mutate the shared registry.
+        import copy
+        model_config = copy.deepcopy(base_config)
         model_config.img_size = img_size
-        
+        model_config.batch_size = get_safe_batch_size(model_name, img_size, default=model_config.batch_size)
+
         all_results = []
         
         for fold in range(n_folds):
@@ -896,12 +949,15 @@ class ExperimentRunner:
         """Train on one dataset, evaluate on another."""
         
         name = f"cross_{train_dataset}_to_{test_dataset}_{model_name}"
-        
-        model_config = MODEL_CONFIGS.get(model_name)
-        if model_config is None:
+
+        base_config = MODEL_CONFIGS.get(model_name)
+        if base_config is None:
             raise ValueError(f"Unknown model: {model_name}")
-        
+
+        import copy
+        model_config = copy.deepcopy(base_config)
         model_config.img_size = img_size
+        model_config.batch_size = get_safe_batch_size(model_name, img_size, default=model_config.batch_size)
         
         config = ExperimentConfig(
             name=name,
@@ -935,10 +991,13 @@ class ExperimentRunner:
             trainer = get_trainer(model_config, self.device)
             cross_metrics = trainer.validate(Path(results.model_path), test_yaml)
             
-            # Add cross-dataset metrics
+            # Add cross-dataset metrics (target-domain performance)
             results.metrics['cross_mAP50'] = cross_metrics['mAP50']
             results.metrics['cross_mAP50-95'] = cross_metrics['mAP50-95']
-            
+            results.metrics['cross_precision'] = cross_metrics.get('precision', 0.0)
+            results.metrics['cross_recall'] = cross_metrics.get('recall', 0.0)
+            results.metrics['cross_f1'] = cross_metrics.get('f1', 0.0)
+
             self.cache.set(results)
         
         return results

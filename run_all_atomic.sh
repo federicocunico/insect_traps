@@ -166,17 +166,22 @@ for dataset in hi_res_low_res combined; do
     done
 done
 
-# EXP5: Alternative Models
-# 2 datasets * 2 models * 3 folds = 12 experiments
+# EXP5: Alternative Architectures
+# Evaluated at parity with YOLO: full resolution sweep (512/640/768/1024) and 5-fold CV.
+# 2 datasets * 2 models * 4 resolutions * 5 folds = 80 experiments.
+# Memory-safe batch sizes are resolved automatically per (model, resolution) inside
+# run_single_experiment.py (get_safe_batch_size), so no --batch-size is needed here.
 echo ""
 echo "=========================================="
-echo "EXP5: Alternative Models"
+echo "EXP5: Alternative Architectures"
 echo "=========================================="
 
 for dataset in hi_res low_res; do
     for model in fasterrcnn_resnet50 rtdetr_l; do
-        for fold in {0..2}; do
-            run_experiment fold exp5 $model 640 $dataset $fold
+        for img_size in 512 640 768 1024; do
+            for fold in {0..4}; do
+                run_experiment fold exp5 $model $img_size $dataset $fold
+            done
         done
     done
 done

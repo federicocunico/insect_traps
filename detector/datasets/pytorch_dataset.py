@@ -84,6 +84,8 @@ class InsectDataset(Dataset):
         """Get label path for an image."""
         # Try different label path patterns
         candidates = [
+            # images/[split]/img.jpg -> labels/[split]/img.txt (hi_res structure)
+            img_path.parent.parent.parent / 'labels' / img_path.parent.name / (img_path.stem + '.txt'),
             img_path.parent.parent / 'labels' / img_path.parent.name / (img_path.stem + '.txt'),
             img_path.parent.parent / 'labels' / (img_path.stem + '.txt'),
             self.data_dir / 'labels' / (img_path.stem + '.txt'),
@@ -107,6 +109,17 @@ class InsectDataset(Dataset):
                     if len(parts) >= 5:
                         cls = int(parts[0])
                         x_center, y_center, width, height = map(float, parts[1:5])
+                        # Clip box to image boundary to handle floating-point precision errors
+                        x_min = max(0.0, x_center - width / 2)
+                        y_min = max(0.0, y_center - height / 2)
+                        x_max = min(1.0, x_center + width / 2)
+                        y_max = min(1.0, y_center + height / 2)
+                        width = x_max - x_min
+                        height = y_max - y_min
+                        if width <= 0 or height <= 0:
+                            continue
+                        x_center = x_min + width / 2
+                        y_center = y_min + height / 2
                         boxes.append([x_center, y_center, width, height])
                         labels.append(cls)
         

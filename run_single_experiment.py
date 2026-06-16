@@ -15,7 +15,32 @@ from detector.experiments.experiment_runner import (
     ExperimentRunner,
     ExperimentConfig,
     MODEL_CONFIGS,
+    get_safe_batch_size,
 )
+
+
+# Metric keys written to done.txt for fold experiments, in a stable order.
+_FOLD_METRIC_KEYS = ['mAP50', 'mAP50-95', 'mAP75', 'precision', 'recall', 'f1']
+
+
+def write_done_file(done_file: Path, result, extra_lines: list = None):
+    """Write a done.txt marker with the full metric set.
+
+    Records every metric the trainers compute (mAP@50, mAP@50-95, mAP@75,
+    precision, recall, F1) so downstream table generation has Precision/Recall/F1
+    without needing to retrain. ``extra_lines`` lets cross-dataset runs append
+    their target-domain metrics.
+    """
+    done_file.parent.mkdir(parents=True, exist_ok=True)
+    metrics = result.metrics
+    with open(done_file, 'w') as f:
+        f.write(f"Completed at: {result.timestamp}\n")
+        f.write(f"Training time: {result.training_time:.2f}s\n")
+        for line in (extra_lines or []):
+            f.write(line + "\n")
+        for key in _FOLD_METRIC_KEYS:
+            if key in metrics:
+                f.write(f"{key}: {metrics[key]:.4f}\n")
 
 
 def cleanup_memory():
@@ -38,7 +63,8 @@ def run_single_fold(
     img_size: int,
     epochs: int,
     device: int,
-    output_dir: Path
+    output_dir: Path,
+    batch_size: int = None
 ):
     """Run a single fold experiment with cleanup."""
     exp_name = f"{group_name}_{dataset}_{model_name}"
@@ -64,9 +90,14 @@ def run_single_fold(
         
         model_config = copy.deepcopy(model_config)
         model_config.img_size = img_size
-        
+        # Resolve a memory-safe batch size (explicit override > per-model/res table > config default)
+        model_config.batch_size = batch_size if batch_size else get_safe_batch_size(
+            model_name, img_size, default=model_config.batch_size
+        )
+        print(f"  Using batch size: {model_config.batch_size} (model={model_name}, img={img_size})")
+
         runner = ExperimentRunner(output_dir=output_dir, device=device)
-        
+
         config = ExperimentConfig(
             name=exp_name,
             dataset=dataset,
@@ -77,22 +108,17 @@ def run_single_fold(
             seed=42,
             device=device
         )
-        
+
         # Clear any stale cache from a previous failed run
         runner.cache.clear(config)
-        
+
         result = runner.run_experiment(config, force=False)
-        
+
         del runner
         cleanup_memory()
-        
-        done_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(done_file, 'w') as f:
-            f.write(f"Completed at: {result.timestamp}\n")
-            f.write(f"Training time: {result.training_time:.2f}s\n")
-            f.write(f"mAP50: {result.metrics.get('mAP50', 0):.4f}\n")
-            f.write(f"mAP50-95: {result.metrics.get('mAP50-95', 0):.4f}\n")
-        
+
+        write_done_file(done_file, result)
+
         print(f"\n[SUCCESS] {exp_name}")
         print(f"  mAP50: {result.metrics.get('mAP50', 0):.4f}")
         print(f"  mAP50-95: {result.metrics.get('mAP50-95', 0):.4f}")
@@ -120,7 +146,8 @@ def run_cross_dataset(
     img_size: int,
     epochs: int,
     device: int,
-    output_dir: Path
+    output_dir: Path,
+    batch_size: int = None
 ):
     """Run cross-dataset experiment with cleanup."""
     exp_name = f"{group_name}_{train_dataset}_to_{test_dataset}_{model_name}"
@@ -143,9 +170,13 @@ def run_cross_dataset(
         
         model_config = copy.deepcopy(model_config)
         model_config.img_size = img_size
-        
+        model_config.batch_size = batch_size if batch_size else get_safe_batch_size(
+            model_name, img_size, default=model_config.batch_size
+        )
+        print(f"  Using batch size: {model_config.batch_size} (model={model_name}, img={img_size})")
+
         runner = ExperimentRunner(output_dir=output_dir, device=device)
-        
+
         result = runner.run_cross_dataset_eval(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
@@ -155,17 +186,24 @@ def run_cross_dataset(
             seed=42,
             force=False
         )
-        
+
         del runner
         cleanup_memory()
-        
-        done_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(done_file, 'w') as f:
-            f.write(f"Completed at: {result.timestamp}\n")
-            f.write(f"Training time: {result.training_time:.2f}s\n")
-            f.write(f"Train mAP50: {result.metrics.get('mAP50', 0):.4f}\n")
-            f.write(f"Cross mAP50: {result.metrics.get('cross_mAP50', 0):.4f}\n")
-        
+
+        m = result.metrics
+        # Keep the legacy "Train/Cross mAP50" keys the table parser expects, and add
+        # the full target-domain metric set. write_done_file also appends the
+        # train-domain mAP/precision/recall/f1 under the standard keys.
+        cross_lines = [
+            f"Train mAP50: {m.get('mAP50', 0):.4f}",
+            f"Cross mAP50: {m.get('cross_mAP50', 0):.4f}",
+            f"Cross mAP50-95: {m.get('cross_mAP50-95', 0):.4f}",
+            f"Cross precision: {m.get('cross_precision', 0):.4f}",
+            f"Cross recall: {m.get('cross_recall', 0):.4f}",
+            f"Cross f1: {m.get('cross_f1', 0):.4f}",
+        ]
+        write_done_file(done_file, result, extra_lines=cross_lines)
+
         print(f"\n[SUCCESS] {exp_name}")
         print(f"  Train mAP50: {result.metrics.get('mAP50', 0):.4f}")
         print(f"  Cross mAP50: {result.metrics.get('cross_mAP50', 0):.4f}")
@@ -194,6 +232,8 @@ def main():
     parser.add_argument('--model', required=True, help='Model name')
     parser.add_argument('--fold', type=int, help='Fold number')
     parser.add_argument('--img-size', type=int, default=1024, help='Image size')
+    parser.add_argument('--batch-size', type=int, default=None,
+                        help='Override batch size (default: memory-safe per model/resolution)')
     parser.add_argument('--epochs', type=int, default=100, help='Training epochs')
     parser.add_argument('--device', type=int, default=0, help='GPU device')
     parser.add_argument('--output-dir', default='runs/experiments', help='Output directory')
@@ -215,7 +255,8 @@ def main():
             img_size=args.img_size,
             epochs=args.epochs,
             device=args.device,
-            output_dir=output_dir
+            output_dir=output_dir,
+            batch_size=args.batch_size
         )
     elif args.type == 'cross':
         if not args.train_dataset or not args.test_dataset:
@@ -229,7 +270,8 @@ def main():
             img_size=args.img_size,
             epochs=args.epochs,
             device=args.device,
-            output_dir=output_dir
+            output_dir=output_dir,
+            batch_size=args.batch_size
         )
     
     sys.exit(0 if success else 1)

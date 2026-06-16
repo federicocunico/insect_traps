@@ -111,8 +111,11 @@ Combined dataset training.
 python run_experiments.py --group exp4
 ```
 
-### Exp5: Alternative Models
-Non-YOLO architectures (Faster R-CNN, RT-DETR).
+### Exp5: Alternative Architectures
+Non-YOLO architectures (Faster R-CNN, RT-DETR) evaluated **at parity with YOLO**:
+the full resolution sweep (512/640/768/1024 px) with 5-fold CV. Memory-safe batch
+sizes are resolved automatically per (model, resolution) — see `get_safe_batch_size`
+in `detector/experiments/experiment_runner.py`.
 ```bash
 python run_experiments.py --group exp5
 ```
@@ -166,17 +169,38 @@ print(f"mAP50: {aggregated['mAP50'][0]:.4f} ± {aggregated['mAP50'][1]:.4f}")
 
 ## Output Metrics
 
-For each experiment, the following metrics are computed:
+For each experiment, the following metrics are computed **and reported in every
+results table**:
 - **mAP@0.5**: Primary comparison metric
 - **mAP@0.75**: Stricter localization
 - **mAP@[0.5:0.95]**: COCO-style comprehensive metric
-- **Precision**: False positive rate assessment
-- **Recall**: False negative rate assessment
+- **Precision**: operating-point precision (confidence ≥ 0.5)
+- **Recall**: operating-point recall (confidence ≥ 0.5)
 - **F1-score**: Harmonic mean
+
+> Precision/Recall/F1 are operating-point metrics. For Faster R-CNN they are
+> computed only on detections with confidence ≥ 0.5 (matching the Ultralytics
+> default for YOLO/RT-DETR) so the numbers are comparable across architectures.
 
 Results are saved to:
 - `runs/experiments/{group}_results.csv`
 - `runs/experiments/{group}_results.tex` (LaTeX table)
+
+### Generating Paper Tables (atomic runner)
+
+The atomic runner (`run_all_atomic.sh` → `run_single_experiment.py`) writes a
+`done.txt` marker per experiment. Build the consolidated tables with:
+
+```bash
+python generate_results_tables.py   # -> experiment_results.{txt,tex}
+```
+
+If `done.txt` files predate the full-metrics format, backfill them from the
+experiment cache (no retraining):
+
+```bash
+python backfill_done_files.py        # add --dry-run to preview
+```
 
 ## Testing
 
