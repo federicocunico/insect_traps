@@ -9,12 +9,16 @@ DEVICE=${1:-0}
 OUTPUT_DIR="runs/experiments"
 ERROR_LOG="${OUTPUT_DIR}/error.txt"
 MAX_RETRIES=3
-EPOCHS=100
+# EPOCHS can be overridden from the environment (e.g. by tmux_experiments_entrypoint.sh);
+# falls back to 50 when unset. This value is passed to run_single_experiment.py via
+# --epochs, so it also supersedes the per-training defaults.
+EPOCHS=${EPOCHS:-50}
 
 echo "Starting atomic experiment runner"
 echo "Device: $DEVICE"
 echo "Output: $OUTPUT_DIR"
 echo "Max retries: $MAX_RETRIES"
+echo "Epochs: $EPOCHS"
 echo "================================"
 echo ""
 
