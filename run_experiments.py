@@ -79,6 +79,9 @@ EXPERIMENT_GROUPS = {
             ('low_res', 'hi_res'),
             ('literature', 'hi_res'),
             ('literature', 'low_res'),
+            # Combined novel datasets (Hi-Res + Low-Res, no Literature) vs Literature.
+            ('hi_res_low_res', 'literature'),
+            ('literature', 'hi_res_low_res'),
         ],
         'models': ['yolov8s', 'yolo11s'],
         'type': 'cross_dataset',

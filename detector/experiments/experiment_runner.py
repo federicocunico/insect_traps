@@ -1082,6 +1082,9 @@ def create_experiment_suite() -> Dict[str, List[ExperimentConfig]]:
         ('low_res', 'hi_res'),
         ('literature', 'hi_res'),
         ('literature', 'low_res'),
+        # Combined novel datasets (Hi-Res + Low-Res, no Literature) vs Literature.
+        ('hi_res_low_res', 'literature'),
+        ('literature', 'hi_res_low_res'),
     ]
     for train_ds, test_ds in cross_pairs:
         for model in ['yolov8s', 'yolo11s']:

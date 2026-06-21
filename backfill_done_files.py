@@ -8,10 +8,14 @@ Recall, F1 and mAP@75 as well. This script rewrites every existing done.txt from
 the JSON cache (runs/experiments/.cache/experiments_cache.json) so the result
 tables gain P/R/F1 *without any retraining*.
 
-Special handling:
-  - Faster R-CNN exp5 runs used a broken (threshold-free) Precision/Recall
-    computation. Their done.txt files are *removed* so the atomic runner reruns
-    them with the corrected metric and the new resolution sweep.
+Faster R-CNN exp5 runs:
+  - These used a broken (threshold-free) Precision/Recall computation. The fix
+    now lives in FasterRCNNTrainer._evaluate() (a 0.5 score threshold), so their
+    done.txt are regenerated *from the existing checkpoints* by
+    recompute_fasterrcnn_done.py — no retraining. This script leaves them
+    untouched. (Historically it *deleted* them to force a rerun, which created an
+    endless delete -> retrain loop because the watchdog entrypoint runs this
+    backfill on every relaunch.)
 
 Run from the repo root:  python backfill_done_files.py [--dry-run]
 """
@@ -79,13 +83,13 @@ def main():
 
         name = entry.name
 
-        # Remove broken Faster R-CNN exp5 markers so they are rerun with the fix.
-        if name.startswith("exp5_") and "fasterrcnn" in name:
-            print(f"[REMOVE] {name} (broken Faster R-CNN P/R metric -> will rerun)")
-            if not args.dry_run:
-                done_file.unlink()
-            n_removed += 1
-            continue
+        # NOTE: Faster R-CNN exp5 runs are intentionally left untouched here.
+        # The corrected (threshold-based) Precision/Recall now lives in
+        # FasterRCNNTrainer._evaluate(), and their done.txt are regenerated from
+        # the existing checkpoints (see recompute_fasterrcnn_done.py) rather than
+        # by retraining. They have no cache entry, so they fall through to the
+        # [MISS] branch below and are preserved. Deleting them here previously
+        # caused an endless delete -> retrain loop on every watchdog relaunch.
 
         fold_m = FOLD_RE.match(name)
         cross_m = CROSS_RE.match(name)

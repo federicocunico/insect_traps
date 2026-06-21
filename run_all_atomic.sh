@@ -133,7 +133,7 @@ for dataset in hi_res low_res literature; do
 done
 
 # EXP3: Cross-Dataset Generalization
-# 6 pairs * 2 models = 12 experiments
+# 8 pairs * 2 models = 16 experiments
 echo ""
 echo "=========================================="
 echo "EXP3: Cross-Dataset Generalization"
@@ -146,6 +146,9 @@ cross_pairs=(
     "low_res hi_res"
     "literature hi_res"
     "literature low_res"
+    # Combined novel datasets (Hi-Res + Low-Res, no Literature) vs Literature
+    "hi_res_low_res literature"
+    "literature hi_res_low_res"
 )
 
 for pair in "${cross_pairs[@]}"; do

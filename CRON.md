@@ -34,9 +34,16 @@ First relaunch happens on the next 5-min tick. To start **now** without waiting:
 bash experiment_watchdog.sh
 ```
 
+## Monitor
+
+```
+tail -f /home/aiprah/github/insect_traps/runs/experiments/watchdog.log
+```
+
+
 ## How it decides (each tick)
 
-1. Count `done.txt` markers vs. `322` total → if complete, do nothing.
+1. Count `done.txt` markers vs. `326` total → if complete, do nothing.
 2. `tmux has-session insect_exps`? → if yes, leave it running.
 3. Otherwise (down + work left) → relaunch via the entrypoint.
 
@@ -57,7 +64,7 @@ tmux attach -t insect_exps                  # attach to the live pipeline
 
 - Restarts a **crashed/dead** session. It does not detect an alive-but-hung
   session — add a heartbeat check if hangs are the failure mode.
-- `TOTAL_EXPECTED=322` in `experiment_watchdog.sh` mirrors the loop counts in
+- `TOTAL_EXPECTED=326` in `experiment_watchdog.sh` mirrors the loop counts in
   `run_all_atomic.sh`; update it if those change.
 - Cron has a minimal `PATH`, so the watchdog hard-sets conda at
   `/home/aiprah/miniconda3` for the relaunched pipeline.

@@ -32,8 +32,8 @@ EPOCHS="${EPOCHS:-}"          # optional epoch override, passed straight through
 OUTPUT_DIR="runs/experiments"
 
 # Expected experiment count — keep in sync with run_all_atomic.sh:
-#   exp1=90  exp2=120  exp3=12  exp4=20  exp5=80  →  322
-TOTAL_EXPECTED=322
+#   exp1=90  exp2=120  exp3=16  exp4=20  exp5=80  →  326
+TOTAL_EXPECTED=326
 
 # Resolve the repo dir from this script's location so cron can run it from /.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
